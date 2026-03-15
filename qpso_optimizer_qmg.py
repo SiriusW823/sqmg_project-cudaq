@@ -152,7 +152,8 @@ class QMGSOQPSOOptimizer:
         x_mut = x.copy()
         n_dim = max(1, int(self.D * self.rng.uniform(0.15, 0.35)))
         dims  = self.rng.choice(self.D, size=n_dim, replace=False)
-        noise = self.rng.standard_cauchy(size=n_dim) * self._mut_range
+        # 修正：用 dims 索引 _mut_range，確保 shape 一致 (n_dim,)
+        noise = self.rng.standard_cauchy(size=n_dim) * self._mut_range[dims]
         x_mut[dims] += noise
         return self._clip(x_mut)
 
