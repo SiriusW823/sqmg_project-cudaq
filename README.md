@@ -110,14 +110,3 @@ python run_qpso_qmg.py \
 | 後期平均 V×U（最後 100 次）| 0.595 | **> 0.75** |
 
 ---
-
-## 引用
-
-```bibtex
-@article{chen2025qmg,
-  title   = {Exploring Chemical Space with Chemistry-Inspired Dynamic Quantum Circuits in the NISQ Era},
-  author  = {Chen, ...},
-  journal = {Journal of Chemical Theory and Computation},
-  year    = {2025},
-}
-```
