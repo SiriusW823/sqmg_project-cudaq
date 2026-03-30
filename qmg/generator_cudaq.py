@@ -387,7 +387,7 @@ class MoleculeGeneratorCUDAQ:
         # ── 量子採樣 ──────────────────────────────────────────────────
         result = cudaq.sample(
             self.kernel,
-            (w.tolist(),),
+            [float(x) for x in w],
             shots_count=num_sample,
         )
 
