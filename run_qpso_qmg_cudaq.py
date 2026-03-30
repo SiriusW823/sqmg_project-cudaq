@@ -176,7 +176,7 @@ def main() -> None:
     logger.info(f"# of heavy atoms: {args.num_heavy_atom}")
     logger.info(f"# of samples: {args.num_sample}")
     logger.info(f"smarts: None")
-    logger.info(f"disable_connectivity_position: None")
+    logger.info(f"disable_connectivity_position: []")
     logger.info(f"CUDA-Q backend: {args.backend}")
     log_gpu_info(logger)
 
@@ -185,7 +185,7 @@ def main() -> None:
     cwg = ConditionalWeightsGenerator(
         args.num_heavy_atom,
         smarts=None,
-        disable_connectivity_position=None,
+        disable_connectivity_position=[],   # [FIX-5] None 在 smarts≠None 時會 TypeError
     )
     n_flexible = int((cwg.parameters_indicator == 0.0).sum())
     logger.info(f"Number of flexible parameters: {n_flexible}")

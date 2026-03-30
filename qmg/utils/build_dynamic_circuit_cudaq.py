@@ -61,7 +61,7 @@ import cudaq
 # ===========================================================================
 
 @cudaq.kernel
-def _qmg_dynamic_n9(weights: list[float]):
+def _qmg_dynamic_n9(weights: List[float]):
     """N=9 QMG 動態分子生成電路（CUDA-Q 實作）。"""
     q = cudaq.qvector(20)  # 20 qubits for N=9
 
