@@ -91,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     # Backend
     p.add_argument(
         "--backend", type=str, default="cudaq_nvidia",
-        choices=["cudaq_qpp", "cudaq_nvidia", "cudaq_nvidia_fp64"],
+        choices=["cudaq_qpp", "cudaq_nvidia", "cudaq_nvidia_fp64", "tensornet"],
         help="CUDA-Q 模擬後端（單 GPU 推薦 cudaq_nvidia）",
     )
     # 輸出
