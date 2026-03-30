@@ -1,10 +1,10 @@
 """
 ==============================================================================
-generator_cudaq.py  (V100 sm_70 相容修正版)
+generator_cudaq.py  (V100 sm_70 相容修正版 v2)
 CUDA-Q 版本的 MoleculeGenerator，對應 Qiskit 版的 qmg/generator.py
 ==============================================================================
 
-修正清單（相對於原版）：
+修正清單（相對於 v1）：
   [BUG-1] 相對 import 錯誤 → 改為完整套件路徑
   [BUG-2] uniqueness 計算：len(smiles_dict)-1 在 validity=100% 時少算 1
   [BUG-3] _CUDAQ_TARGET_MAP 補齊常用 alias，移除不存在的 nvidia-mgpu
@@ -15,6 +15,11 @@ CUDA-Q 版本的 MoleculeGenerator，對應 Qiskit 版的 qmg/generator.py
            cudaq.set_target("nvidia") 會靜默 fallback 到 qpp-cpu(CPU)，
            本修正版加入明確的 GPU 可用性驗證與警告，並在 cudaq 0.7.x
            的 SampleResult API 差異間提供相容 shim。
+  [BUG-7] ★ _iter_sample_result 加入 expected_bits 長度驗證：
+           Dynamic circuit 在不同 backend 下 __global__ 可能不含全部
+           90 個 mz() 結果，加入長度檢查後可早期發現並 fallback 至
+           get_sequential_data()，避免靜默解碼錯誤分子。
+  [BUG-8] ★ sample_molecule 傳入 expected_bits，確保端到端一致性。
 
 架構背景：
   V100 = Volta = sm_70
@@ -164,40 +169,99 @@ def _set_target_safe(target_name: str) -> str:
 
 
 # ===========================================================================
-# SampleResult 相容 shim（0.7.x vs 0.8.x API 差異）
+# [BUG-7] SampleResult 相容 shim，含 bitstring 長度驗證
 # ===========================================================================
 
-def _iter_sample_result(result) -> list[tuple[str, int]]:
+def _iter_sample_result(
+    result,
+    expected_bits: int,
+) -> list[tuple[str, int]]:
     """
-    從 SampleResult 取得 (bitstring, count) 對。
-    相容 CUDA-Q 0.7.x 與 0.8.x 的 API 差異：
-      0.8.x：result.items() 直接可用
-      0.7.x：result.items() 通常也存在，但部分 build 可能只有
-             result.get_register_counts() 或 dict(result)
+    從 SampleResult 取得 (__global__ bitstring, count) 對。
+
+    核心修正 [BUG-7]：
+      加入 expected_bits 長度驗證，確保 dynamic circuit 的所有 mz() 呼叫
+      都被完整捕獲進 __global__ 暫存器。
+      N=9 時 expected_bits = 90（9 × 10）。
+
+      若 items() 回傳的 bitstring 長度不符，代表 backend（通常是 nvidia）
+      在處理 mid-circuit measurement + classical feedback 時行為異常，
+      自動 fallback 至 get_sequential_data() 進行手動聚合。
+
+    路徑優先順序：
+      1. result.items()          → O(unique) 聚合，效能最佳，優先使用
+      2. result.get_sequential_data() → O(shots) 未聚合，效能較差，作 fallback
+      3. RuntimeError            → 兩條路都失敗時，主動拋錯（禁止靜默解碼）
     """
-    # 優先嘗試標準 dict-like items()（0.8.x 及大部分 0.7.x）
+    # ── 路徑 1：標準聚合路徑 ──────────────────────────────────────────────
     if hasattr(result, "items"):
         try:
-            return list(result.items())
-        except Exception:
-            pass
+            pairs = list(result.items())
+            if pairs:
+                actual_bits = len(pairs[0][0])
 
-    # fallback：嘗試 dict() 轉換（部分 0.7.x build）
-    try:
-        return list(dict(result).items())
-    except Exception:
-        pass
+                # [BUG-7] ★ 核心長度驗證
+                if actual_bits != expected_bits:
+                    warnings.warn(
+                        f"\n[CUDAQ] __global__ bitstring 長度不符！\n"
+                        f"  預期長度 : {expected_bits} bits\n"
+                        f"  實際長度 : {actual_bits} bits\n"
+                        f"  register_names : {getattr(result, 'register_names', 'N/A')}\n"
+                        f"  可能原因 : nvidia backend 對 mid-circuit measurement +\n"
+                        f"             classical feedback 的處理與 qpp-cpu 不同，\n"
+                        f"             部分 mz() 未進入 __global__。\n"
+                        f"  處置     : 自動 fallback 至 get_sequential_data()。\n"
+                        f"  建議     : 改用 --backend cudaq_qpp 確保正確性。"
+                    )
+                    # 不 return，落入 fallback
+                else:
+                    return pairs  # ✅ 長度正確，直接回傳
 
-    # 最後手段：get_bitstrings()（記憶體較高，但保證可用）
-    warnings.warn(
-        "[CUDAQ] result.items() 不可用，改用 get_bitstrings()（記憶體用量較高）。\n"
-        "建議升級 cuda-quantum 至 0.7.1 以取得完整 API 支援。"
+        except Exception as e:
+            warnings.warn(f"[CUDAQ] result.items() 失敗：{e}，嘗試 fallback。")
+
+    # ── 路徑 2：per-shot 手動聚合 fallback ──────────────────────────────
+    if hasattr(result, "get_sequential_data"):
+        try:
+            shots = result.get_sequential_data()   # list[str]，len = shots_count
+
+            if shots:
+                actual_bits = len(shots[0])
+
+                # fallback 路徑同樣做長度驗證
+                if actual_bits != expected_bits:
+                    raise RuntimeError(
+                        f"[CUDAQ] get_sequential_data() 回傳的 bitstring 長度同樣錯誤！\n"
+                        f"  預期 : {expected_bits} bits，實際 : {actual_bits} bits\n"
+                        f"  kernel 中的 mz() 呼叫數可能與 num_heavy_atom 不符。\n"
+                        f"  請確認 build_dynamic_circuit_cudaq.py 的 N=9 kernel\n"
+                        f"  共有 {expected_bits} 個 mz() 呼叫。"
+                    )
+
+                warnings.warn(
+                    f"[CUDAQ] 使用 get_sequential_data() fallback，"
+                    f"shots={len(shots)}，效能低於 items()，建議優先排查 backend 問題。"
+                )
+                counts: dict[str, int] = {}
+                for bs in shots:
+                    counts[bs] = counts.get(bs, 0) + 1
+                return list(counts.items())
+
+        except RuntimeError:
+            raise  # 長度驗證失敗，直接上拋，不再嘗試其他路徑
+        except Exception as e:
+            warnings.warn(f"[CUDAQ] get_sequential_data() 失敗：{e}")
+
+    # ── 路徑 3：完全失敗，明確報錯（禁止靜默產出錯誤分子）──────────────
+    raise RuntimeError(
+        f"[CUDAQ] 無法從 SampleResult 取得合法的 {expected_bits}-bit bitstring。\n"
+        f"  register_names : {getattr(result, 'register_names', 'N/A')}\n"
+        f"  可用 API       : {[m for m in dir(result) if not m.startswith('_')]}\n"
+        f"  建議步驟       :\n"
+        f"    1. 執行 verify_n9_bitstring.py 確認 kernel 正確性\n"
+        f"    2. 確認 cuda-quantum 版本 >= 0.7.1\n"
+        f"    3. 改用 --backend cudaq_qpp 排除 backend 問題"
     )
-    bs_list = result.get_bitstrings()
-    counts: dict[str, int] = {}
-    for bs in bs_list:
-        counts[bs] = counts.get(bs, 0) + 1
-    return list(counts.items())
 
 
 # ===========================================================================
@@ -216,6 +280,11 @@ class MoleculeGeneratorCUDAQ:
         需使用 cuda-quantum-cu11==0.7.1 或 cuda-quantum-cu12==0.7.1。
         CUDA-Q >= 0.8.0 的 pip wheel 不含 sm_70 PTX，__init__ 時會拋出
         明確的 RuntimeError 而非靜默 fallback 至 CPU。
+
+    Bitstring 驗證說明 [BUG-7]：
+        N=9 時每次採樣的 __global__ bitstring 預期長度為 90（= 9 × 10）。
+        若 backend 回傳長度不符，sample_molecule 會拋出 RuntimeError
+        而非靜默產出解碼錯誤的分子，保護 V×U 指標的可信度。
     """
 
     def __init__(
@@ -241,6 +310,10 @@ class MoleculeGeneratorCUDAQ:
         self.remove_bond_disconnection = remove_bond_disconnection
         self.chemistry_constraint      = chemistry_constraint
 
+        # [BUG-8] 預先計算 expected_bits，在 __init__ 就確定，
+        # 避免每次 sample_molecule 重複計算，也方便 debug 時直接查詢。
+        self.expected_bits = num_heavy_atom * (num_heavy_atom + 1)
+
         # 電路建構器（提供 kernel + bond fix post-processing）
         self.circuit_builder = DynamicCircuitBuilderCUDAQ(
             num_heavy_atom            = num_heavy_atom,
@@ -265,10 +338,12 @@ class MoleculeGeneratorCUDAQ:
         ver_str, _ = _check_cudaq_version_volta_compat()
         print(
             f"[CUDAQ] Generator initialized.\n"
-            f"  cudaq version : {ver_str}\n"
-            f"  active target : {self._active_target}\n"
-            f"  N atoms       : {num_heavy_atom}\n"
-            f"  weight dim    : {self.circuit_builder.length_all_weight_vector}"
+            f"  cudaq version  : {ver_str}\n"
+            f"  active target  : {self._active_target}\n"
+            f"  N atoms        : {num_heavy_atom}\n"
+            f"  weight dim     : {self.circuit_builder.length_all_weight_vector}\n"
+            f"  expected_bits  : {self.expected_bits}  "
+            f"(= {num_heavy_atom} × {num_heavy_atom + 1})"
         )
 
     # ----------------------------------------------------------------
@@ -286,6 +361,9 @@ class MoleculeGeneratorCUDAQ:
         """
         執行量子電路採樣並解碼為 SMILES 字典。
 
+        [BUG-7 / BUG-8] 加入 expected_bits 傳遞，確保 _iter_sample_result
+        能驗證 __global__ bitstring 是否包含全部 mz() 測量結果。
+
         Returns:
             smiles_dict  : {smiles_str: shot_count}（含 None key 代表無效分子）
             validity     : 有效分子 shots / 總 shots
@@ -296,7 +374,8 @@ class MoleculeGeneratorCUDAQ:
 
         w = self.all_weight_vector
         assert len(w) == self.circuit_builder.length_all_weight_vector, (
-            f"weight 長度不符：{len(w)} != {self.circuit_builder.length_all_weight_vector}"
+            f"weight 長度不符：{len(w)} != "
+            f"{self.circuit_builder.length_all_weight_vector}"
         )
 
         # [BUG-4 修正] set_random_seed 跨版本 API 保護
@@ -312,11 +391,12 @@ class MoleculeGeneratorCUDAQ:
             shots_count=num_sample,
         )
 
-        # ── [BUG-5 + BUG-6] Bit-string 解碼（跨版本相容） ───────────
+        # ── [BUG-5 + BUG-7] Bit-string 解碼（跨版本相容 + 長度驗證） ──
         smiles_dict:    dict[str, int] = {}
         num_valid_shots = 0
 
-        for bs, count in _iter_sample_result(result):
+        # [BUG-8] 傳入 expected_bits，讓 _iter_sample_result 做長度驗證
+        for bs, count in _iter_sample_result(result, expected_bits=self.expected_bits):
             bs_fixed      = self.circuit_builder.apply_bond_disconnection_correction(bs)
             quantum_state = self.data_generator.post_process_quantum_state(
                 bs_fixed, reverse=False
@@ -353,25 +433,59 @@ MoleculeGenerator = MoleculeGeneratorCUDAQ
 if __name__ == "__main__":
     import time
 
-    print("=== MoleculeGeneratorCUDAQ 功能驗證 ===")
+    print("=== MoleculeGeneratorCUDAQ 功能驗證 (v2) ===")
     ver_str, is_compat = _check_cudaq_version_volta_compat()
     print(f"CUDA-Q version       : {ver_str}")
     print(f"Volta (sm_70) compat : {'✓ YES' if is_compat else '✗ NO — 請降版至 0.7.1'}")
 
-    N   = 5
+    N   = 9
     cwg = ConditionalWeightsGenerator(N, smarts=None)
     w   = cwg.generate_conditional_random_weights(random_seed=42)
 
-    gen = MoleculeGeneratorCUDAQ(N, all_weight_vector=w, backend_name="cudaq_qpp")
-    t0  = time.time()
-    smiles_dict, validity, uniqueness = gen.sample_molecule(1000)
-    print(f"Validity  : {validity:.3f}")
-    print(f"Uniqueness: {uniqueness:.3f}")
-    print(f"V×U       : {validity*uniqueness:.4f}")
-    print(f"Elapsed   : {time.time()-t0:.1f}s")
+    # ── Step 1：先用 CPU 驗證 bitstring 長度正確性 ──────────────────────
+    print(f"\n[Step 1] qpp-cpu 驗證 bitstring 長度（預期 {N*(N+1)} = 90 bits）...")
+    gen_cpu = MoleculeGeneratorCUDAQ(N, all_weight_vector=w, backend_name="cudaq_qpp")
+
+    result_raw = cudaq.sample(gen_cpu.kernel, w.tolist(), shots_count=100)
+    pairs      = list(result_raw.items())
+    actual_len = len(pairs[0][0]) if pairs else -1
+    print(f"  register_names : {result_raw.register_names}")
+    print(f"  bitstring 長度 : {actual_len}（預期 {N*(N+1)}）")
+    print(f"  unique states  : {len(pairs)}")
+    assert actual_len == N * (N + 1), \
+        f"❌ bitstring 長度錯誤！kernel 的 mz() 數量可能有誤。"
+    print("  ✅ bitstring 長度正確")
+
+    # ── Step 2：完整 sample_molecule 流程測試 ───────────────────────────
+    print(f"\n[Step 2] sample_molecule() 功能測試（shots=1000）...")
+    t0 = time.time()
+    smiles_dict, validity, uniqueness = gen_cpu.sample_molecule(1000)
+    elapsed = time.time() - t0
+    print(f"  Validity   : {validity:.3f}")
+    print(f"  Uniqueness : {uniqueness:.3f}")
+    print(f"  V×U        : {validity * uniqueness:.4f}")
+    print(f"  Elapsed    : {elapsed:.1f}s")
     top5 = [
         (s, c) for s, c in
         sorted(smiles_dict.items(), key=lambda x: -x[1])
         if s and s != "None"
     ][:5]
-    print("Top-5:", top5)
+    print(f"  Top-5      : {top5}")
+
+    # ── Step 3：若有 GPU，額外測試 nvidia backend ────────────────────────
+    print(f"\n[Step 3] 嘗試 nvidia backend 測試...")
+    if not is_compat:
+        print("  ⚠️  CUDA-Q 版本不相容 V100，跳過 nvidia backend 測試。")
+    else:
+        try:
+            gen_gpu = MoleculeGeneratorCUDAQ(
+                N, all_weight_vector=w, backend_name="cudaq_nvidia"
+            )
+            _, v_gpu, u_gpu = gen_gpu.sample_molecule(1000)
+            print(f"  nvidia V×U : {v_gpu * u_gpu:.4f}")
+            print(f"  ✅ nvidia backend 正常（bitstring 長度驗證通過）")
+        except RuntimeError as e:
+            print(f"  ✗ nvidia backend 失敗（可使用 cudaq_qpp）：")
+            print(f"    {str(e).splitlines()[0]}")
+
+    print("\n=== 驗證完成 ===")
