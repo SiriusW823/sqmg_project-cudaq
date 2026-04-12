@@ -1,13 +1,22 @@
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 import warnings
+import sys
+import os
 
-# rdkit 2026.03.1 的 sascorer 內部已改用 rdFingerprintGenerator，
-# 但在舊版路徑或中間版本可能印出 DEPRECATION WARNING。
-# 此 import 對 conda-forge 版 rdkit 正常可用。
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    from rdkit.Contrib.SA_Score import sascorer
+# rdkit SA_Score import 相容性處理：
+#   - pip 版 rdkit：from rdkit.Contrib.SA_Score import sascorer
+#   - conda-forge 版 rdkit 2026.x：需透過 RDConfig.RDContribDir 路徑 import
+try:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        from rdkit.Contrib.SA_Score import sascorer
+except (ModuleNotFoundError, ImportError):
+    from rdkit.Chem import RDConfig
+    sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import sascorer
 
 from rdkit.Chem.Crippen import MolLogP, MolMR
 import numpy as np
@@ -52,13 +61,13 @@ class FitnessCalculator():
             smiles_dict_copy.pop(None, None)
             total_unique_smiles = len(smiles_dict_copy.keys())
             return total_unique_smiles / total_samples, total_unique_smiles / total_samples
-        
+
         total_count = 0
         property_sum = 0
         property_pure_sum = 0
         for smiles, count in smiles_dict.items():
             mol = Chem.MolFromSmiles(str(smiles))
-            if mol == None:
+            if mol is None:
                 continue
             else:
                 total_count += count
@@ -70,23 +79,23 @@ class FitnessCalculator():
                     property_sum += self.calc_property(mol) * count
                     property_pure_sum = property_sum
         return property_sum / total_count, property_pure_sum / total_count
-    
+
     def generate_distribution(self, smiles_dict: dict):
         data_list = []
         for smiles, count in smiles_dict.items():
             mol = Chem.MolFromSmiles(str(smiles))
-            if mol == None:
+            if mol is None:
                 data_list += [0] * count
             else:
                 property = self.calc_property(mol)
                 data_list += [property] * count
         return data_list
-    
+
     def generate_property_distribution(self, smiles_dict: dict):
         data_list = []
         for smiles, count in smiles_dict.items():
             mol = Chem.MolFromSmiles(str(smiles))
-            if mol == None:
+            if mol is None:
                 continue
             else:
                 property = self.calc_property(mol)
@@ -97,25 +106,26 @@ class FitnessCalculator():
         prop_dict = {}
         for smiles, count in smiles_dict.items():
             mol = Chem.MolFromSmiles(str(smiles))
-            if mol == None:
+            if mol is None:
                 continue
             else:
                 property = self.calc_property(mol)
                 prop_dict.update({smiles: property})
         return prop_dict
 
+
 class FitnessCalculatorWrapper():
-    def __init__(self, task_list: List[str], condition:None):
+    def __init__(self, task_list: List[str], condition: None):
         self.task_list = task_list
         self.condition_list = [float(x) if x not in [None, "None"] else None for x in condition]
         self.function_dict = {task: FitnessCalculator(task) for task in self.task_list}
         self.task_condition = {task: condition for task, condition in zip(self.task_list, self.condition_list)}
-    
+
     def evaluate(self, smiles_dict):
         score_dict = dict()
         score_pure_dict = dict()
         for task in self.task_list:
             score, score_pure = self.function_dict[task].calc_score(smiles_dict, self.task_condition[task])
-            score_dict.update({task: (score, None) })
+            score_dict.update({task: (score, None)})
             score_pure_dict.update({task: score_pure})
         return score_dict, score_pure_dict

@@ -1,41 +1,13 @@
 """
 ==============================================================================
-generator_cudaq.py  (CUDA-Q 0.7.1 / V100 sm_70 完整修正版 v2)
+generator_cudaq.py  (CUDA-Q 0.7.1 / V100 sm_70 完整修正版 v7)
 ==============================================================================
 
-環境確認（cudaq-v071 conda 環境）：
-  cudaq       : 0.7.1
-  Python      : 3.10.20
-  numpy       : 1.26.4
-  rdkit       : 2026.03.1
-  custatevec  : 1.5.0 (pip custatevec-cu11)
-
-修正清單：
-  [FIX-1] cudaq.__version__ 字串解析：
-          0.7.1 回傳 "CUDA-Q Version 0.7.1 (https://...)"，
-          直接 split('.') + int() 會崩潰。改用 re.search 提取純版號。
-
-  [FIX-2] _smoke_kernel 移至模組層級：
-          @cudaq.kernel 裝飾器在 JIT 時用 inspect.getsource() 讀取原始碼，
-          巢狀函式在某些 Python frame 下會失敗。模組層級定義最穩定。
-
-  [FIX-3] ★ 最關鍵修正：cudaq.sample() 加入 explicit_measurements=True
-          cudaq 0.7.1 SampleResult 行為（依 NVIDIA 官方文件）：
-            - 預設（explicit_measurements=False）：
-              __global__ 含所有 mz() qubit 在電路 END 的重測結果（最終狀態）
-              對 20-qubit N=9 kernel：result.items() 回傳 20-bit 字串
-              → decode 時 bitstring 長度不符 90，導致 SMILES 解碼完全錯誤
-            - explicit_measurements=True：
-              __global__ 含所有顯式 mz() 呼叫依序拼接
-              對 N=9 kernel（90 個 mz()）：result.items() 回傳 90-bit 字串
-              → decode 正確 ✓
-
-  [FIX-4] _reconstruct_bitstrings_n9 簡化：
-          加入 explicit_measurements=True 後，result.items() 直接回傳
-          90-bit 字串，不再需要逐暫存器重建的複雜邏輯。
-          保留版本感知框架，同時簡化 0.7.x 路徑。
-
-  [FIX-5] sample_molecule 空 raw_counts 防呆。
+根本解法（基於官方文件）：
+  cudaq 0.7.1 官方的正確模式是 closure/capture，不是 list[float] parameter。
+  sample_molecule() 每次呼叫 build_kernel_from_weights(w) 建立新 kernel，
+  再以 cudaq.sample(k, shots_count=N)（無額外參數）採樣。
+  無參數 → __isBroadcast = False → 正確的 shot-by-shot 路徑。
 ==============================================================================
 """
 from __future__ import annotations
@@ -56,8 +28,7 @@ from qmg.utils.build_dynamic_circuit_cudaq import DynamicCircuitBuilderCUDAQ
 
 
 # ===========================================================================
-# [FIX-2] 模組層級 smoke test kernel
-# 必須在模組層級定義，避免 inspect.getsource() 在巢狀函式中失敗
+# 模組層級 smoke test kernel（無參數，不觸發 broadcast）
 # ===========================================================================
 
 @cudaq.kernel
@@ -68,43 +39,26 @@ def _smoke_kernel():
 
 
 # ===========================================================================
-# CUDA-Q 版本與 V100 架構相容性
+# CUDA-Q 版本與 V100 相容性
 # ===========================================================================
 
 def _check_cudaq_version_volta_compat() -> tuple[str, bool]:
-    """
-    解析 cudaq.__version__ 並判斷是否支援 V100 (sm_70)。
-
-    cudaq 0.7.1 版本字串格式：
-        "CUDA-Q Version 0.7.1 (https://github.com/NVIDIA/cuda-quantum ...)"
-    直接 split('.') + int() 在 parts[0] = "CUDA-Q Version 0" 時會拋 ValueError。
-    改用 re.search 提取純數字版號。
-
-    回傳 (version_string, is_volta_compatible)
-    is_volta_compatible=True 代表版本 <= 0.7.x，支援 sm_70。
-    """
     try:
         ver_str = cudaq.__version__
         match = re.search(r'(\d+)\.(\d+)\.(\d+)', ver_str)
         if match:
-            major = int(match.group(1))
-            minor = int(match.group(2))
+            major, minor = int(match.group(1)), int(match.group(2))
             return ver_str, (major, minor) <= (0, 7)
-        # 無法解析版號 → 保守假設為相容
         return ver_str, True
     except Exception:
         return "unknown", True
 
 
 def _verify_gpu_actually_used(target_name: str) -> bool:
-    """
-    用模組層級 _smoke_kernel 驗證 GPU target 確實有效。
-    """
-    if target_name not in ("nvidia", "nvidia-fp64", "tensornet"):
+    if target_name not in ("nvidia", "nvidia-fp64"):
         return False
     try:
-        result = cudaq.sample(_smoke_kernel, shots_count=16,
-                              explicit_measurements=True)
+        result = cudaq.sample(_smoke_kernel, shots_count=16)
         return len(dict(result.items())) > 0
     except Exception as e:
         warnings.warn(f"[CUDAQ] GPU smoke test 失敗：{e}")
@@ -125,7 +79,7 @@ _CUDAQ_TARGET_MAP = {
     "tensornet":         "tensornet",
     "qiskit_aer":        "qpp-cpu",
 }
-_GPU_TARGETS = {"nvidia", "nvidia-fp64", "tensornet"}
+_GPU_TARGETS = {"nvidia", "nvidia-fp64"}
 
 
 def _set_target_safe(target_name: str) -> str:
@@ -134,7 +88,7 @@ def _set_target_safe(target_name: str) -> str:
         raise RuntimeError(
             f"\n{'='*60}\n"
             f"[CUDAQ] CUDA-Q {ver_str} 不支援 V100 (sm_70)。\n"
-            f"  請安裝：pip install cuda-quantum==0.7.1\n"
+            f"  請安裝：pip install cuda-quantum-cu11==0.7.1\n"
             f"{'='*60}"
         )
     try:
@@ -151,76 +105,83 @@ def _set_target_safe(target_name: str) -> str:
 
 
 # ===========================================================================
-# [FIX-3+4] bitstring 重建
+# 90-bit bitstring 重建（具名暫存器策略）
 # ===========================================================================
+
+_N9_NAMED_REGS: list[str] = [
+    'a1_0', 'a1_1',
+    'a2_0', 'a2_1',
+    'b21_0', 'b21_1',
+    'a3_0', 'a3_1',
+    'b31_0', 'b31_1', 'b32_0', 'b32_1',
+    'a4_0', 'a4_1',
+    'b41_0', 'b41_1', 'b42_0', 'b42_1', 'b43_0', 'b43_1',
+    'a5_0', 'a5_1',
+    'b51_0', 'b51_1', 'b52_0', 'b52_1',
+    'b53_0', 'b53_1', 'b54_0', 'b54_1',
+    'a6_0', 'a6_1',
+    'b61_0', 'b61_1', 'b62_0', 'b62_1', 'b63_0', 'b63_1',
+    'b64_0', 'b64_1', 'b65_0', 'b65_1',
+    'a7_0', 'a7_1',
+    'b71_0', 'b71_1', 'b72_0', 'b72_1', 'b73_0', 'b73_1',
+    'b74_0', 'b74_1', 'b75_0', 'b75_1', 'b76_0', 'b76_1',
+    'a8_0', 'a8_1',
+    'b81_0', 'b81_1', 'b82_0', 'b82_1', 'b83_0', 'b83_1',
+    'b84_0', 'b84_1', 'b85_0', 'b85_1', 'b86_0', 'b86_1',
+    'b87_0', 'b87_1',
+    'a9_0', 'a9_1',
+]  # 共 74 個具名暫存器
+
 
 def _reconstruct_bitstrings_n9(result) -> dict[str, int]:
     """
-    從 SampleResult 重建 {90-bit-bitstring: count} dict。
-
-    前提：cudaq.sample() 已使用 explicit_measurements=True。
-    在此模式下，result.items() 回傳 __global__ 暫存器的內容，
-    即所有顯式 mz() 依序拼接的 90-bit 字串，可直接使用。
-
-    容錯：若 items() 的字串長度不是 90（例如未來版本行為變化），
-    則嘗試 get_sequential_data() 逐暫存器重建。
+    90-bit bitstring 重建：
+      bits[ 0:74] — 74 個具名 mz() → get_sequential_data(reg)
+      bits[74:90] — 16 個無名 mz()（鍵 9-{1..8}）→ __global__[4:20]
     """
-    # ── 主路徑：explicit_measurements=True 後 items() 應直接是 90 bits ──────
     try:
-        sample_items = list(result.items())
-        if sample_items:
-            first_bs = sample_items[0][0]
-            if len(first_bs) == 90:
-                return {bs: cnt for bs, cnt in sample_items}
-            # 長度不符，記錄警告並繼續嘗試備用路徑
-            warnings.warn(
-                f"[CUDAQ] result.items() bitstring 長度為 {len(first_bs)}，"
-                f"預期 90。嘗試 get_sequential_data() 備用路徑。"
-            )
-    except Exception as e:
-        warnings.warn(f"[CUDAQ] result.items() 失敗：{e}，嘗試備用路徑。")
+        reg_data = {reg: result.get_sequential_data(reg) for reg in _N9_NAMED_REGS}
+    except AttributeError:
+        warnings.warn("[CUDAQ] get_sequential_data() 不存在，使用 items() fallback。")
+        counts: dict[str, int] = {}
+        for bs_raw, cnt in result.items():
+            if len(bs_raw) == 90:
+                counts[bs_raw] = counts.get(bs_raw, 0) + cnt
+        return counts
 
-    # ── 備用路徑：逐暫存器重建（0.9.x+ 無 explicit_measurements 時的行為）──
-    _N9_NAMED_REG_ORDER = [
-        'a1_0', 'a1_1', 'a2_0', 'a2_1',
-        'b21_0', 'b21_1',
-        'a3_0', 'a3_1',
-        'b31_0', 'b31_1', 'b32_0', 'b32_1',
-        'a4_0', 'a4_1',
-        'b41_0', 'b41_1', 'b42_0', 'b42_1', 'b43_0', 'b43_1',
-        'a5_0', 'a5_1',
-        'b51_0', 'b51_1', 'b52_0', 'b52_1', 'b53_0', 'b53_1', 'b54_0', 'b54_1',
-        'a6_0', 'a6_1',
-        'b61_0', 'b61_1', 'b62_0', 'b62_1', 'b63_0', 'b63_1',
-        'b64_0', 'b64_1', 'b65_0', 'b65_1',
-        'a7_0', 'a7_1',
-        'b71_0', 'b71_1', 'b72_0', 'b72_1', 'b73_0', 'b73_1',
-        'b74_0', 'b74_1', 'b75_0', 'b75_1', 'b76_0', 'b76_1',
-        'a8_0', 'a8_1',
-        'b81_0', 'b81_1', 'b82_0', 'b82_1', 'b83_0', 'b83_1',
-        'b84_0', 'b84_1', 'b85_0', 'b85_1', 'b86_0', 'b86_1', 'b87_0', 'b87_1',
-        'a9_0', 'a9_1',
-        '__global__',
-    ]
-    available_regs = set(getattr(result, 'register_names', []))
-    missing = [r for r in _N9_NAMED_REG_ORDER if r not in available_regs]
-    if missing:
-        raise RuntimeError(
-            f"[CUDAQ] 無法重建 bitstring。\n"
-            f"  items() 長度不符，且缺少暫存器：{missing[:5]}\n"
-            f"  請確認 cudaq.sample() 使用了 explicit_measurements=True"
-        )
-    reg_data = {reg: result.get_sequential_data(reg)
-                for reg in _N9_NAMED_REG_ORDER}
-    n_shots = len(reg_data[_N9_NAMED_REG_ORDER[0]])
+    n_shots = len(reg_data['a1_0'])
+    if n_shots == 0:
+        warnings.warn("[CUDAQ] get_sequential_data('a1_0') 回傳空列表，射次為 0。")
+        return {}
+
+    try:
+        global_data = result.get_sequential_data('__global__')
+    except Exception:
+        global_data = None
+
     counts: dict[str, int] = {}
+    warned_global = False
     for i in range(n_shots):
-        bs = ''.join(reg_data[reg][i] for reg in _N9_NAMED_REG_ORDER)
+        named_bits = ''.join(reg_data[reg][i] for reg in _N9_NAMED_REGS)
+
+        if global_data and len(global_data) > i and len(global_data[i]) >= 20:
+            bond9_bits = global_data[i][4:20]
+        else:
+            bond9_bits = '0' * 16
+            if not warned_global:
+                warnings.warn(
+                    "[CUDAQ] __global__ 不可用，鍵 9-{1..8} 補零。"
+                    "apply_bond_disconnection_correction 確保原子9至少有一鍵。"
+                )
+                warned_global = True
+
+        bs = named_bits + bond9_bits
         if len(bs) != 90:
             raise RuntimeError(
-                f"Shot {i}: 重建 bitstring 長度 {len(bs)} != 90"
+                f"Shot {i}: bitstring 長度 {len(bs)} != 90"
             )
         counts[bs] = counts.get(bs, 0) + 1
+
     return counts
 
 
@@ -232,9 +193,8 @@ class MoleculeGeneratorCUDAQ:
     """
     CUDA-Q 版分子生成器（CUDA-Q 0.7.1 / V100 sm_70 相容）。
 
-    公開介面：
-        update_weight_vector(w)
-        sample_molecule(num_sample) → (smiles_dict, validity, uniqueness)
+    核心設計：每次 sample_molecule() 建立一個 closure kernel，
+    weights 已 bake 進 kernel，cudaq.sample(k) 無參數，不觸發 broadcasting。
     """
 
     def __init__(
@@ -270,7 +230,6 @@ class MoleculeGeneratorCUDAQ:
             remove_bond_disconnection = remove_bond_disconnection,
             chemistry_constraint      = chemistry_constraint,
         )
-        self.kernel = self.circuit_builder.get_kernel()
 
         self.data_generator = MoleculeQuantumStateGenerator(
             heavy_atom_size = num_heavy_atom,
@@ -288,7 +247,8 @@ class MoleculeGeneratorCUDAQ:
             f"  active target : {self._active_target}\n"
             f"  N atoms       : {num_heavy_atom}\n"
             f"  weight dim    : {self.circuit_builder.length_all_weight_vector}\n"
-            f"  expected_bits : {self.expected_bits}"
+            f"  expected_bits : {self.expected_bits}\n"
+            f"  design        : closure/capture (no-arg kernel)"
         )
 
     def update_weight_vector(
@@ -314,28 +274,21 @@ class MoleculeGeneratorCUDAQ:
         except AttributeError:
             pass
 
-        # [FIX-3] ★ 必須加 explicit_measurements=True
-        # 否則 result.items() 回傳 20-bit（最終 qubit 狀態），非 90-bit（mz 序列）
-        # 根據 NVIDIA 官方 0.7.1 文件：
-        #   explicit_measurements=True → __global__ = 所有 mz() 依序拼接 → 90 bits ✓
-        #   explicit_measurements=False（預設） → __global__ = 電路末端重測值 → 20 bits ✗
-        result = cudaq.sample(
-            self.kernel,
-            w.tolist(),
-            shots_count=num_sample,
-            explicit_measurements=True,   # ← 關鍵
-        )
+        # ★ v7 核心：closure kernel，無參數，不觸發 broadcasting
+        kernel = self.circuit_builder.build_kernel_from_weights(w)
 
-        # [FIX-4] 重建 90-bit bitstring dict
+        # cudaq.sample(kernel) — no args → __isBroadcast = False
+        # → 正確的 conditionalOnMeasure shot-by-shot 路徑
+        result = cudaq.sample(kernel, shots_count=num_sample)
+
         raw_counts = _reconstruct_bitstrings_n9(result)
 
-        # [FIX-5] raw_counts 空值防呆
         if not raw_counts:
-            warnings.warn("[CUDAQ] sample_molecule: raw_counts 為空，回傳 validity=0。")
+            warnings.warn("[CUDAQ] raw_counts 為空，回傳 validity=0。")
             return {}, 0.0, 0.0
 
         # 解碼 bitstring → SMILES
-        smiles_dict:    dict[str, int] = {}
+        smiles_dict: dict[str, int] = {}
         num_valid_shots = 0
 
         for bs, count in raw_counts.items():
@@ -367,29 +320,50 @@ MoleculeGenerator = MoleculeGeneratorCUDAQ
 if __name__ == "__main__":
     import time
 
-    print("=== MoleculeGeneratorCUDAQ 功能驗證 ===")
+    print("=== MoleculeGeneratorCUDAQ 功能驗證 (v7 closure/capture) ===")
     ver_str, is_compat = _check_cudaq_version_volta_compat()
     print(f"CUDA-Q : {ver_str}  Volta compat: {'✓' if is_compat else '⚠ >=0.8'}")
 
     cwg = ConditionalWeightsGenerator(9, smarts=None)
     w   = cwg.generate_conditional_random_weights(random_seed=42)
 
-    print("\n[Test CPU] qpp-cpu, 200 shots")
+    # ── Test 1：CPU ─────────────────────────────────────────────────────────
+    print("\n[Test 1] qpp-cpu, 200 shots")
     gen = MoleculeGeneratorCUDAQ(9, all_weight_vector=w, backend_name="cudaq_qpp")
     t0  = time.time()
     smiles_dict, v, u = gen.sample_molecule(200)
-    print(f"  V={v:.3f}  U={u:.3f}  V×U={v*u:.4f}  ({time.time()-t0:.1f}s)")
+    elapsed = time.time() - t0
+    print(f"  V={v:.3f}  U={u:.3f}  V×U={v*u:.4f}  ({elapsed:.1f}s)")
     valid_smiles = [k for k in smiles_dict if k and k != "None"]
-    print(f"  有效分子數: {len(valid_smiles)}  範例: {valid_smiles[:3]}")
+    print(f"  有效分子數: {len(valid_smiles)}")
+    print(f"  範例 SMILES: {valid_smiles[:5]}")
+    if v > 0:
+        print("  [Test 1] ✓ CPU 解碼正常，可啟動正式實驗")
+    else:
+        print("  [Test 1] ✗ validity=0")
+        # Debug：測試 closure kernel 的 metadata
+        k_test = gen.circuit_builder.build_kernel_from_weights(w)
+        print(f"  [DEBUG] kernel type     = {type(k_test)}")
+        print(f"  [DEBUG] kernel metadata = {k_test.metadata}")
+        print(f"  [DEBUG] kernel arguments= {k_test.arguments}")
 
-    print("\n[Test GPU] nvidia, 500 shots")
+    # ── Test 2：GPU ─────────────────────────────────────────────────────────
+    print("\n[Test 2] nvidia GPU, 500 shots")
     try:
         gen_gpu = MoleculeGeneratorCUDAQ(9, all_weight_vector=w,
                                          backend_name="cudaq_nvidia")
         t0 = time.time()
-        smiles_dict, v, u = gen_gpu.sample_molecule(500)
-        print(f"  V={v:.3f}  U={u:.3f}  V×U={v*u:.4f}  ({time.time()-t0:.1f}s)  ✓")
-        valid_smiles = [k for k in smiles_dict if k and k != "None"]
-        print(f"  有效分子數: {len(valid_smiles)}  範例: {valid_smiles[:3]}")
+        smiles_dict_gpu, v_gpu, u_gpu = gen_gpu.sample_molecule(500)
+        elapsed = time.time() - t0
+        print(f"  V={v_gpu:.3f}  U={u_gpu:.3f}  V×U={v_gpu*u_gpu:.4f}  ({elapsed:.1f}s)")
+        valid_smiles_gpu = [k for k in smiles_dict_gpu if k and k != "None"]
+        print(f"  有效分子數: {len(valid_smiles_gpu)}")
+        print(f"  範例 SMILES: {valid_smiles_gpu[:5]}")
+        if v_gpu > 0:
+            print("  [Test 2] ✓ GPU 解碼正常，可啟動正式實驗")
+        else:
+            print("  [Test 2] ✗ GPU validity=0")
     except Exception as e:
-        print(f"  GPU 失敗：{e}")
+        print(f"  [Test 2] GPU 失敗：{e}")
+        import traceback
+        traceback.print_exc()
