@@ -1,47 +1,35 @@
 """
 ==============================================================================
-build_dynamic_circuit_cudaq.py
-CUDA-Q 0.7.1 版 QMG 動態電路 — Closure/Capture 模式（v7）
+build_dynamic_circuit_cudaq.py  (v8)
+CUDA-Q 0.7.1 — Closure/Capture + 記憶體管理
 ==============================================================================
 
-v1-v6 問題根因總結：
-  cudaq 0.7.1 的 cudaq.sample() 文件明確指出：
-    "For broadcasting: arguments should be structured as a list or ndarray
-     of argument values of the specified kernel argument type."
-  當 kernel 取 list[float] 時，cudaq.sample(kernel, weights_list) 被識別
-  為 broadcasting（134個float = 134組執行），每次 kernel(float) 報型別錯誤。
-  直接呼叫 cudaq_runtime shot-loop 繞過 broadcasting 會導致 Eigen assertion
-  失敗（狀態向量未正確初始化）。
+v7 問題：
+  每次 make_qmg_n9_kernel() 建立新的 @cudaq.kernel，
+  MLIR module 累積在記憶體中不會被 GC 釋放，
+  155 次後 OOM → Killed。
 
-v7 修復方案（基於官方文件）：
-  官方快速入門的正確模式：
-    weights = [...]        # outer scope capture
-    @cudaq.kernel
-    def kernel():          # NO PARAMETERS
-        ry(weights[0], q)  # captures from outer scope
-    result = cudaq.sample(kernel)  # no args → __isBroadcast = False → correct!
+v8 修正：
+  build_kernel_from_weights() 每次回傳新 kernel 後，
+  呼叫方負責 del kernel + gc.collect() 釋放 MLIR 記憶體。
+  generator 的 sample_molecule() 已加入正確的清理邏輯。
 
-  實現：make_qmg_n9_kernel(weights) 工廠函式
-    每次評估呼叫工廠，建立一個新的 kernel 函式，其 weights 已被 bake 進去。
-    cudaq.sample(k, shots_count=N)（無參數）走正確的 shot-by-shot 路徑。
+效能說明：
+  qpp-cpu：supportsConditionalFeedback=False
+    → Python shot-by-shot loop，10000 shots = 10000 次 kernel 呼叫
+    → ~90s/eval，10000 shots，太慢
 
-  代價：每次評估重新編譯（~520 次 JIT 編譯）。
-  對 QPSO 520 次評估、每次 10000 shots 的實驗規模，編譯開銷可接受。
+  nvidia GPU：supportsConditionalFeedback=True
+    → cuStateVec 原生處理 conditional，一次呼叫完成所有 shots
+    → 預計 1-5s/eval（速度提升 20~90x）
 
-Clbit layout（90 bits，依 mz() 呼叫順序）
-  bits[ 0: 2] 原子 1   bits[ 2: 4] 原子 2   bits[ 4: 6] 鍵 2-1
-  bits[ 6: 8] 原子 3   bits[ 8:12] 鍵 3-{1,2}
-  bits[12:14] 原子 4   bits[14:20] 鍵 4-{1,2,3}
-  bits[20:22] 原子 5   bits[22:30] 鍵 5-{1..4}
-  bits[30:32] 原子 6   bits[32:42] 鍵 6-{1..5}
-  bits[42:44] 原子 7   bits[44:56] 鍵 7-{1..6}
-  bits[56:58] 原子 8   bits[58:72] 鍵 8-{1..7}
-  bits[72:74] 原子 9   bits[74:90] 鍵 9-{1..8}
+  建議：使用 --backend cudaq_nvidia
 ==============================================================================
 """
 from __future__ import annotations
 
 import math
+import gc
 import numpy as np
 from typing import Union, List
 
@@ -50,32 +38,26 @@ import cudaq
 
 def make_qmg_n9_kernel(weights: list):
     """
-    工廠函式：建立一個捕捉 weights 的 N=9 QMG 動態電路 kernel。
+    工廠函式：建立捕捉 weights 的 N=9 QMG 動態電路 kernel（無參數）。
 
-    官方 closure/capture 模式：
-      - kernel 不接受任何參數（no parameters）
-      - weights 作為常數從外部作用域被 JIT 編譯器捕捉並 bake 進 MLIR
-      - cudaq.sample(k) 不觸發 broadcasting，走正確的 shot-by-shot 路徑
+    使用後請呼叫 del kernel; gc.collect() 釋放 MLIR 記憶體。
 
     Args:
-        weights: 134 個 float，已完成 chemistry_constraint 處理
+        weights: 長度 134 的 Python float list
 
     Returns:
-        @cudaq.kernel 函式（無參數）
+        無參數的 @cudaq.kernel
     """
     assert len(weights) == 134, f"weights 長度 {len(weights)} != 134"
-
-    # 提取為 Python float，確保 JIT 編譯器正確識別為數值常數
     w = [float(x) for x in weights]
 
     @cudaq.kernel
     def _qmg_n9():
-        """N=9 QMG 動態分子生成電路（closure/capture 模式）。"""
         q = cudaq.qvector(20)
 
-        # ====================================================================
+        # ================================================================
         # Phase 1: build_two_atoms   w[0:8]
-        # ====================================================================
+        # ================================================================
         ry(math.pi * w[0], q[0])
         x(q[1])
         ry(math.pi * w[2], q[2])
@@ -100,9 +82,9 @@ def make_qmg_n9_kernel(weights: list):
         b21_0 = mz(q[4])
         b21_1 = mz(q[5])
 
-        # ====================================================================
+        # ================================================================
         # Phase 2: atom 3   w[8:17]
-        # ====================================================================
+        # ================================================================
         if a2_0:
             x(q[2])
         if a2_1:
@@ -131,9 +113,9 @@ def make_qmg_n9_kernel(weights: list):
         b32_0 = mz(q[6])
         b32_1 = mz(q[7])
 
-        # ====================================================================
+        # ================================================================
         # Phase 3: atom 4   w[17:29]
-        # ====================================================================
+        # ================================================================
         if a3_0:
             x(q[2])
         if a3_1:
@@ -171,9 +153,9 @@ def make_qmg_n9_kernel(weights: list):
         b43_0 = mz(q[8])
         b43_1 = mz(q[9])
 
-        # ====================================================================
+        # ================================================================
         # Phase 4: atom 5   w[29:44]
-        # ====================================================================
+        # ================================================================
         if a4_0:
             x(q[2])
         if a4_1:
@@ -220,9 +202,9 @@ def make_qmg_n9_kernel(weights: list):
         b54_0 = mz(q[10])
         b54_1 = mz(q[11])
 
-        # ====================================================================
+        # ================================================================
         # Phase 5: atom 6   w[44:62]
-        # ====================================================================
+        # ================================================================
         if a5_0:
             x(q[2])
         if a5_1:
@@ -278,9 +260,9 @@ def make_qmg_n9_kernel(weights: list):
         b65_0 = mz(q[12])
         b65_1 = mz(q[13])
 
-        # ====================================================================
+        # ================================================================
         # Phase 6: atom 7   w[62:83]
-        # ====================================================================
+        # ================================================================
         if a6_0:
             x(q[2])
         if a6_1:
@@ -345,9 +327,9 @@ def make_qmg_n9_kernel(weights: list):
         b76_0 = mz(q[14])
         b76_1 = mz(q[15])
 
-        # ====================================================================
+        # ================================================================
         # Phase 7: atom 8   w[83:107]
-        # ====================================================================
+        # ================================================================
         if a7_0:
             x(q[2])
         if a7_1:
@@ -421,9 +403,9 @@ def make_qmg_n9_kernel(weights: list):
         b87_0 = mz(q[16])
         b87_1 = mz(q[17])
 
-        # ====================================================================
+        # ================================================================
         # Phase 8: atom 9   w[107:134]
-        # ====================================================================
+        # ================================================================
         if a8_0:
             x(q[2])
         if a8_1:
@@ -491,22 +473,14 @@ def make_qmg_n9_kernel(weights: list):
             ry.ctrl(math.pi * w[132], q[19], q[18])
             ry.ctrl(math.pi * w[133], q[18], q[19])
 
-        mz(q[4])
-        mz(q[5])
-        mz(q[6])
-        mz(q[7])
-        mz(q[8])
-        mz(q[9])
-        mz(q[10])
-        mz(q[11])
-        mz(q[12])
-        mz(q[13])
-        mz(q[14])
-        mz(q[15])
-        mz(q[16])
-        mz(q[17])
-        mz(q[18])
-        mz(q[19])
+        mz(q[4]);  mz(q[5])
+        mz(q[6]);  mz(q[7])
+        mz(q[8]);  mz(q[9])
+        mz(q[10]); mz(q[11])
+        mz(q[12]); mz(q[13])
+        mz(q[14]); mz(q[15])
+        mz(q[16]); mz(q[17])
+        mz(q[18]); mz(q[19])
 
     return _qmg_n9
 
@@ -516,9 +490,7 @@ def make_qmg_n9_kernel(weights: list):
 # ===========================================================================
 
 class DynamicCircuitBuilderCUDAQ:
-    """
-    CUDA-Q 版 QMG 動態電路建構器（CUDA-Q 0.7.1 Closure/Capture 模式）。
-    """
+    """CUDA-Q 0.7.1 版 QMG 動態電路建構器（Closure/Capture 模式）。"""
 
     def __init__(
         self,
@@ -528,9 +500,7 @@ class DynamicCircuitBuilderCUDAQ:
         chemistry_constraint:      bool  = True,
     ):
         if num_heavy_atom != 9:
-            raise NotImplementedError(
-                f"目前僅支援 N=9（N={num_heavy_atom} 尚未實作）。"
-            )
+            raise NotImplementedError(f"目前僅支援 N=9（N={num_heavy_atom} 尚未實作）。")
         self.num_heavy_atom            = num_heavy_atom
         self.temperature               = temperature
         self.remove_bond_disconnection = remove_bond_disconnection
@@ -542,44 +512,21 @@ class DynamicCircuitBuilderCUDAQ:
 
     def build_kernel_from_weights(self, weights) -> "cudaq.PyKernelDecorator":
         """
-        用給定的 weights 建立一個新的 N=9 closure kernel。
-        每次呼叫都返回一個全新的 kernel 實例（JIT 尚未編譯）。
-        第一次 cudaq.sample(k) 時才觸發 JIT 編譯。
+        建立捕捉 weights 的無參數 closure kernel。
 
-        Args:
-            weights: list 或 np.ndarray，長度 134
-
-        Returns:
-            無參數的 @cudaq.kernel，weights 已 bake 進去
+        使用後請呼叫:
+            del kernel
+            gc.collect()
+        釋放 MLIR 記憶體，避免 OOM。
         """
-        if hasattr(weights, 'tolist'):
-            w_list = [float(x) for x in weights]
-        else:
-            w_list = [float(x) for x in weights]
+        w_list = [float(x) for x in (weights.tolist() if hasattr(weights, 'tolist') else weights)]
         return make_qmg_n9_kernel(w_list)
 
-    def softmax_temperature(
-        self, weight_vector: np.ndarray, temperature: float = None
-    ) -> np.ndarray:
-        t    = temperature if temperature is not None else self.temperature
-        v    = weight_vector / t
-        exps = np.exp(v - np.max(v))
-        return exps / np.sum(exps)
-
     def apply_bond_disconnection_correction(self, bitstring: str) -> str:
-        """
-        後處理：確保每個存在的原子至少有一條鍵。
-
-        Clbit layout（reverse=False）：
-          原子 k：bits[(k-1)²+(k-1):(k-1)²+(k-1)+2]
-          鍵  k ：bits[k²-k+2 : k²-k+2+2*(k-1)]
-        """
         if not self.remove_bond_disconnection:
             return bitstring
-
         n    = self.num_heavy_atom
         bits = list(bitstring)
-
         for k in range(3, n + 1):
             atom_start  = (k - 1) ** 2 + (k - 1)
             atom_exists = bits[atom_start] == '1' or bits[atom_start + 1] == '1'
@@ -589,5 +536,4 @@ class DynamicCircuitBuilderCUDAQ:
             bond_end   = bond_start + 2 * (k - 1)
             if all(b == '0' for b in bits[bond_start:bond_end]):
                 bits[bond_end - 1] = '1'
-
         return ''.join(bits)

@@ -1,17 +1,26 @@
 """
 ==============================================================================
-generator_cudaq.py  (CUDA-Q 0.7.1 / V100 sm_70 完整修正版 v7)
+generator_cudaq.py  (CUDA-Q 0.7.1 / V100 sm_70 完整修正版 v8)
 ==============================================================================
 
-根本解法（基於官方文件）：
-  cudaq 0.7.1 官方的正確模式是 closure/capture，不是 list[float] parameter。
-  sample_molecule() 每次呼叫 build_kernel_from_weights(w) 建立新 kernel，
-  再以 cudaq.sample(k, shots_count=N)（無額外參數）採樣。
-  無參數 → __isBroadcast = False → 正確的 shot-by-shot 路徑。
+v7 問題：
+  每次建立新 @cudaq.kernel → MLIR module 累積 → 155 次後 OOM → Killed
+  qpp-cpu shot-by-shot loop：~95s/eval × 520 evals = ~14h，太慢
+
+v8 修正：
+  1. ★ 記憶體管理：sample_molecule() 完成後 del kernel + gc.collect()
+  2. ★ 效能：GPU (nvidia) supportsConditionalFeedback=True
+               → cuStateVec 一次完成所有 shots，預計 1~5s/eval
+               → 強烈建議使用 --backend cudaq_nvidia
+
+速度對比（10000 shots，N=9）：
+  qpp-cpu  : ~90s/eval，基於 Python shot-by-shot loop（10000 次呼叫）
+  nvidia   : ~1-5s/eval，cuStateVec 原生處理（GPU 記憶體內完成）
 ==============================================================================
 """
 from __future__ import annotations
 
+import gc
 import re
 import warnings
 import numpy as np
@@ -28,7 +37,7 @@ from qmg.utils.build_dynamic_circuit_cudaq import DynamicCircuitBuilderCUDAQ
 
 
 # ===========================================================================
-# 模組層級 smoke test kernel（無參數，不觸發 broadcast）
+# 模組層級 smoke test kernel
 # ===========================================================================
 
 @cudaq.kernel
@@ -130,7 +139,7 @@ _N9_NAMED_REGS: list[str] = [
     'b84_0', 'b84_1', 'b85_0', 'b85_1', 'b86_0', 'b86_1',
     'b87_0', 'b87_1',
     'a9_0', 'a9_1',
-]  # 共 74 個具名暫存器
+]  # 74 個具名暫存器
 
 
 def _reconstruct_bitstrings_n9(result) -> dict[str, int]:
@@ -151,7 +160,7 @@ def _reconstruct_bitstrings_n9(result) -> dict[str, int]:
 
     n_shots = len(reg_data['a1_0'])
     if n_shots == 0:
-        warnings.warn("[CUDAQ] get_sequential_data('a1_0') 回傳空列表，射次為 0。")
+        warnings.warn("[CUDAQ] get_sequential_data 回傳空列表，n_shots=0。")
         return {}
 
     try:
@@ -171,15 +180,13 @@ def _reconstruct_bitstrings_n9(result) -> dict[str, int]:
             if not warned_global:
                 warnings.warn(
                     "[CUDAQ] __global__ 不可用，鍵 9-{1..8} 補零。"
-                    "apply_bond_disconnection_correction 確保原子9至少有一鍵。"
+                    "bond_disconnection_correction 確保原子9至少有一鍵。"
                 )
                 warned_global = True
 
         bs = named_bits + bond9_bits
         if len(bs) != 90:
-            raise RuntimeError(
-                f"Shot {i}: bitstring 長度 {len(bs)} != 90"
-            )
+            raise RuntimeError(f"Shot {i}: bitstring 長度 {len(bs)} != 90")
         counts[bs] = counts.get(bs, 0) + 1
 
     return counts
@@ -193,8 +200,9 @@ class MoleculeGeneratorCUDAQ:
     """
     CUDA-Q 版分子生成器（CUDA-Q 0.7.1 / V100 sm_70 相容）。
 
-    核心設計：每次 sample_molecule() 建立一個 closure kernel，
-    weights 已 bake 進 kernel，cudaq.sample(k) 無參數，不觸發 broadcasting。
+    效能建議：使用 backend_name='cudaq_nvidia'（GPU）。
+      GPU：supportsConditionalFeedback=True → 1~5s/eval（10000 shots）
+      CPU：supportsConditionalFeedback=False → ~95s/eval（10000 shots）
     """
 
     def __init__(
@@ -248,7 +256,7 @@ class MoleculeGeneratorCUDAQ:
             f"  N atoms       : {num_heavy_atom}\n"
             f"  weight dim    : {self.circuit_builder.length_all_weight_vector}\n"
             f"  expected_bits : {self.expected_bits}\n"
-            f"  design        : closure/capture (no-arg kernel)"
+            f"  design        : closure/capture + gc.collect() memory management"
         )
 
     def update_weight_vector(
@@ -274,12 +282,17 @@ class MoleculeGeneratorCUDAQ:
         except AttributeError:
             pass
 
-        # ★ v7 核心：closure kernel，無參數，不觸發 broadcasting
+        # ★ 建立 closure kernel（weights bake 進去，無參數）
         kernel = self.circuit_builder.build_kernel_from_weights(w)
 
-        # cudaq.sample(kernel) — no args → __isBroadcast = False
-        # → 正確的 conditionalOnMeasure shot-by-shot 路徑
-        result = cudaq.sample(kernel, shots_count=num_sample)
+        try:
+            # cudaq.sample(kernel) 無額外參數 → __isBroadcast=False
+            # → 正確的 conditionalOnMeasure 路徑
+            result = cudaq.sample(kernel, shots_count=num_sample)
+        finally:
+            # ★ 立即釋放 MLIR module，避免 OOM
+            del kernel
+            gc.collect()
 
         raw_counts = _reconstruct_bitstrings_n9(result)
 
@@ -320,50 +333,56 @@ MoleculeGenerator = MoleculeGeneratorCUDAQ
 if __name__ == "__main__":
     import time
 
-    print("=== MoleculeGeneratorCUDAQ 功能驗證 (v7 closure/capture) ===")
+    print("=== MoleculeGeneratorCUDAQ 功能驗證 (v8) ===")
     ver_str, is_compat = _check_cudaq_version_volta_compat()
     print(f"CUDA-Q : {ver_str}  Volta compat: {'✓' if is_compat else '⚠ >=0.8'}")
 
     cwg = ConditionalWeightsGenerator(9, smarts=None)
     w   = cwg.generate_conditional_random_weights(random_seed=42)
 
-    # ── Test 1：CPU ─────────────────────────────────────────────────────────
-    print("\n[Test 1] qpp-cpu, 200 shots")
-    gen = MoleculeGeneratorCUDAQ(9, all_weight_vector=w, backend_name="cudaq_qpp")
-    t0  = time.time()
-    smiles_dict, v, u = gen.sample_molecule(200)
-    elapsed = time.time() - t0
-    print(f"  V={v:.3f}  U={u:.3f}  V×U={v*u:.4f}  ({elapsed:.1f}s)")
-    valid_smiles = [k for k in smiles_dict if k and k != "None"]
-    print(f"  有效分子數: {len(valid_smiles)}")
-    print(f"  範例 SMILES: {valid_smiles[:5]}")
-    if v > 0:
-        print("  [Test 1] ✓ CPU 解碼正常，可啟動正式實驗")
-    else:
-        print("  [Test 1] ✗ validity=0")
-        # Debug：測試 closure kernel 的 metadata
-        k_test = gen.circuit_builder.build_kernel_from_weights(w)
-        print(f"  [DEBUG] kernel type     = {type(k_test)}")
-        print(f"  [DEBUG] kernel metadata = {k_test.metadata}")
-        print(f"  [DEBUG] kernel arguments= {k_test.arguments}")
-
-    # ── Test 2：GPU ─────────────────────────────────────────────────────────
-    print("\n[Test 2] nvidia GPU, 500 shots")
+    # ── Test 1：GPU（優先）──────────────────────────────────────────────────
+    print("\n[Test 1] nvidia GPU, 500 shots（建議使用 GPU 跑正式實驗）")
     try:
         gen_gpu = MoleculeGeneratorCUDAQ(9, all_weight_vector=w,
                                          backend_name="cudaq_nvidia")
         t0 = time.time()
-        smiles_dict_gpu, v_gpu, u_gpu = gen_gpu.sample_molecule(500)
+        sd_gpu, v_gpu, u_gpu = gen_gpu.sample_molecule(500)
         elapsed = time.time() - t0
         print(f"  V={v_gpu:.3f}  U={u_gpu:.3f}  V×U={v_gpu*u_gpu:.4f}  ({elapsed:.1f}s)")
-        valid_smiles_gpu = [k for k in smiles_dict_gpu if k and k != "None"]
-        print(f"  有效分子數: {len(valid_smiles_gpu)}")
-        print(f"  範例 SMILES: {valid_smiles_gpu[:5]}")
+        valid_gpu = [k for k in sd_gpu if k and k != "None"]
+        print(f"  有效分子數: {len(valid_gpu)}")
+        print(f"  範例 SMILES: {valid_gpu[:5]}")
         if v_gpu > 0:
-            print("  [Test 2] ✓ GPU 解碼正常，可啟動正式實驗")
+            print("  [Test 1] ✓ GPU 正常，預計正式實驗 ~1-5s/eval")
         else:
-            print("  [Test 2] ✗ GPU validity=0")
+            print("  [Test 1] ✗ GPU validity=0，改用 CPU 繼續")
     except Exception as e:
-        print(f"  [Test 2] GPU 失敗：{e}")
-        import traceback
-        traceback.print_exc()
+        print(f"  [Test 1] GPU 失敗：{e}")
+
+    # ── Test 2：CPU（備用）──────────────────────────────────────────────────
+    print("\n[Test 2] qpp-cpu, 200 shots（備用，~95s/eval 較慢）")
+    gen_cpu = MoleculeGeneratorCUDAQ(9, all_weight_vector=w, backend_name="cudaq_qpp")
+    t0 = time.time()
+    sd_cpu, v_cpu, u_cpu = gen_cpu.sample_molecule(200)
+    elapsed = time.time() - t0
+    print(f"  V={v_cpu:.3f}  U={u_cpu:.3f}  V×U={v_cpu*u_cpu:.4f}  ({elapsed:.1f}s)")
+    valid_cpu = [k for k in sd_cpu if k and k != "None"]
+    print(f"  有效分子數: {len(valid_cpu)}")
+    print(f"  範例 SMILES: {valid_cpu[:5]}")
+    if v_cpu > 0:
+        print("  [Test 2] ✓ CPU 正常")
+        proj_time = elapsed / 200 * 10000 * 520 / 3600
+        print(f"  [Test 2] 預計完整實驗耗時：~{proj_time:.0f}h（建議改用 GPU）")
+    else:
+        print("  [Test 2] ✗ CPU validity=0")
+
+    print("\n=== 部署後正式實驗指令 ===")
+    print("tmux new-session -s qmg_paper")
+    print("# 在 tmux 內：")
+    print("python run_qpso_qmg_cudaq.py \\")
+    print("    --backend cudaq_nvidia --num_heavy_atom 9 \\")
+    print("    --num_sample 10000 --particles 20 --iterations 25 \\")
+    print("    --alpha_max 1.2 --alpha_min 0.4 --mutation_prob 0.10 \\")
+    print("    --stagnation_limit 12 --seed 42 \\")
+    print("    --task_name unconditional_9_qpso_paper \\")
+    print("    --data_dir results_paper_comparison")
