@@ -28,14 +28,20 @@ bitstring 結構（90 bits，對應 _N9_ALL_REGS 的順序）：
   bits[74:90]  b91_0..b98_1        (bond 9→1..9→8)
 ==============================================================================
 """
-from __future__ import annotations
-
 import math
 import warnings
 import numpy as np
 from typing import Union, List
 
 import cudaq
+
+# NOTE:
+# CUDA-Q 0.7.1 inspects kernel parameter annotations at decoration time to
+# decide whether a Python list argument is a single `list[float]` payload or a
+# broadcasted batch. Postponed evaluation (`from __future__ import annotations`)
+# turns `list[float]` into the string `"list[float]"`, which causes
+# `cudaq.runtime.utils.__isBroadcast()` to misclassify `_qmg_n9(...)` as a
+# broadcast call and then unpack the weight vector into scalar floats.
 
 
 # ===========================================================================
