@@ -50,7 +50,12 @@ class MoleculeQuantumStateGenerator():
         node_vector = np.zeros(self.size)
         adjacency_matrix = np.zeros((self.size, self.size))
         mol = Chem.MolFromSmiles(smiles)
-        Chem.Kekulize(mol)
+        if mol is None:
+            return node_vector, adjacency_matrix
+        try:
+            Chem.Kekulize(mol)
+        except Exception:
+            return node_vector, adjacency_matrix
         for atom in mol.GetAtoms():
             idx = atom.GetIdx()
             atom_type = atom.GetSymbol()

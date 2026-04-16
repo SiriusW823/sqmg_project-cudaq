@@ -40,10 +40,13 @@ class FitnessCalculator():
             return Descriptors.TPSA(mol)
         elif self.task in ["sascore", "SAscore"]:
             return sascorer.calculateScore(mol)
+        raise ValueError(f"Unsupported task: {self.task}")
 
     def calc_score(self, smiles_dict: dict, condition_score=None):
         if self.task == "validity":
             total_samples = sum(smiles_dict.values())
+            if total_samples == 0:
+                return 0.0, 0.0
             validity = (total_samples - smiles_dict.get(None, 0) - smiles_dict.get("None", 0)) / total_samples
             return validity, validity
         elif self.task == "uniqueness":
@@ -51,11 +54,15 @@ class FitnessCalculator():
             smiles_dict_copy.pop("None", None)
             smiles_dict_copy.pop(None, None)
             total_valid_samples = sum(smiles_dict_copy.values())
+            if total_valid_samples == 0:
+                return 0.0, 0.0
             total_unique_smiles = len(smiles_dict_copy.keys())
             uniqueness = total_unique_smiles / total_valid_samples
             return uniqueness, uniqueness
         elif self.task in ["product_validity_uniqueness", "product_uniqueness_validity"]:
             total_samples = sum(smiles_dict.values())
+            if total_samples == 0:
+                return 0.0, 0.0
             smiles_dict_copy = smiles_dict.copy()
             smiles_dict_copy.pop("None", None)
             smiles_dict_copy.pop(None, None)
@@ -71,13 +78,15 @@ class FitnessCalculator():
                 continue
             else:
                 total_count += count
-                if condition_score:
+                if condition_score is not None:
                     mol_property = self.calc_property(mol)
                     property_sum += np.abs(mol_property - condition_score) * count
                     property_pure_sum += mol_property * count
                 else:
                     property_sum += self.calc_property(mol) * count
                     property_pure_sum = property_sum
+        if total_count == 0:
+            return 0.0, 0.0
         return property_sum / total_count, property_pure_sum / total_count
 
     def generate_distribution(self, smiles_dict: dict):
