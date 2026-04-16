@@ -5,7 +5,7 @@ from typing import List
 
 class ConditionalWeightsGenerator():
     """ Generate the corresponding weights in dynamic quantum circuit, based on the provided Molecule SMARTS representation. """
-    def __init__(self, num_heavy_atom:int, smarts=None, disable_connectivity_position:List[int]=[]):
+    def __init__(self, num_heavy_atom:int, smarts=None, disable_connectivity_position:List[int]=None):
         self.num_heavy_atom = num_heavy_atom
         self.length_all_weight_vector = int(8 + (num_heavy_atom - 2) * (num_heavy_atom + 3) * 3 / 2)
         self.parameters_value = np.zeros(self.length_all_weight_vector)
@@ -20,11 +20,19 @@ class ConditionalWeightsGenerator():
         self.qubits_per_type_atom = int(np.ceil(np.log2(len(self.atom_type_to_idx) + 1)))
         self.qubits_per_type_bond = int(np.ceil(np.log2(len(self.bond_type_to_idx))))
         self.smarts = smarts
-        self.disable_connectivity_position = disable_connectivity_position
+        self.disable_connectivity_position = disable_connectivity_position or []
         self.mapnum_atom_dict = {}
         self.mapnum_bond_dict = {}
         if smarts:
-            self.mol = Chem.MolFromSmiles(smarts)
+            # NOTE:
+            #   The original interface uses `smarts` as parameter name in this project.
+            #   In practice users often pass mapped SMILES templates, but true SMARTS
+            #   should still be supported. Try SMARTS first, then fallback to SMILES.
+            self.mol = Chem.MolFromSmarts(smarts)
+            if self.mol is None:
+                self.mol = Chem.MolFromSmiles(smarts)
+            if self.mol is None:
+                raise ValueError(f"Invalid SMARTS / SMILES template: {smarts}")
             self.num_fixed_atoms = self.mol.GetNumAtoms()
             Chem.Kekulize(self.mol, clearAromaticFlags=True)
             self._initialize_maps()
