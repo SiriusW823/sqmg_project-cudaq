@@ -1,37 +1,32 @@
 """
 ==============================================================================
-generator_cudaq.py  (CUDA-Q 0.7.1 / V100 sm_70 完整修正版 v9.3)
+generator_cudaq.py  (CUDA-Q 0.7.1 / V100 sm_70 完整修正版 v9.4)
 ==============================================================================
 
-v9.2 → v9.3 根本原因修正：
+v9.3 → v9.4 記憶體修正：
 
-  ★ 真正的 Bug 根源（確認）：
-      v9.2 假設「跨模組 import 觸發 broadcast」是錯誤的。
-      診斷結果顯示：即使 cudaq.sample(self._kernel, w_list, ...) 從
-      generator_cudaq.py 內部的 sample_molecule() 呼叫，依然失敗。
-      因此，cross-module import 不是根本原因。
+  ★ OOM Kill 根本原因（三層）：
 
-  ★ 實際根本原因：_qmg_n9_v9 充斥著 CUDA-Q 0.7.1 無法正確解析的分號語法：
-        a1_0 = mz(q[0]); a1_1 = mz(q[1])   ← 分號（CUDA-Q AST bug）
-        if a2_0: x(q[2])                    ← 單行 if
-        ry(math.pi * w[8], q[2]); ry(...)   ← 分號
+    [1] C++ heap 未歸還 OS（主因）
+        cudaq 0.7.1 的 SampleResult 透過 pybind11 繫結，
+        C++ 端的 heap 記憶體即使 Python del result 後也不會
+        歸還 OS。每次評估累積 ~50-90 MB 殘留，
+        202 次評估後耗盡 16 GB V100 系統記憶體。
+        修正：sample_molecule() 末段加入
+              del result → gc.collect() → malloc_trim(0)
 
-      CUDA-Q 0.7.1 的 MLIR 前端遇到分號時，第二個語句的 register 名稱
-      會被標記為 anonymous 或丟棄，造成 MLIR function 的 list[float] 參數
-      型別元資料不完整。cudaq.sample() 因此無法識別 list[float] 型別，
-      退回到 broadcast dispatch → 將 134 個 float 當作 134 次獨立呼叫。
-      最終產生：「Argument of type <class 'float'> was provided, but
-                list[float] was expected.」
+    [2] _reconstruct_bitstrings_n9 記憶體峰值過高
+        原版一次將 90 個 register × 10000 shots 全部讀入記憶體，
+        每次評估峰值約 90 * 10000 * Python字串物件 ≈ 80-120 MB。
+        修正：逐 register 讀取並立即丟棄，不保留整個 reg_data dict；
+              使用 bytearray 累積 bit，避免大量中間字串物件。
 
-  ★ v9.3 修正方案：
-      build_dynamic_circuit_cudaq.py 的 _qmg_n9 已在 v9.1 套用分號修正
-      （每個語句各佔獨立一行，無分號，無單行 if）。
-      v9.3 直接使用 _qmg_n9 取代有問題的 _qmg_n9_v9，
-      不需要重新撰寫電路邏輯。
+    [3] QPSO history list 線性增長（輕微，不是主因）
+        不修改演算法邏輯，但已透過 generator 週期性重建緩解。
 
-  v9.2 移除（原說明保留供追溯）：
-      _qmg_n9_v9 kernel 定義已從本檔移除。
-      若需參考電路邏輯，請查看 build_dynamic_circuit_cudaq.py 的 _qmg_n9。
+v9.3 修正保留（分號 AST bug）：
+    使用 build_dynamic_circuit_cudaq._qmg_n9（v9.1 分號修正版）
+    取代有問題的 _qmg_n9_v9，解決 list[float] broadcast dispatch 錯誤。
 
 速度對比（10000 shots，N=9）：
   qpp-cpu  : ~90s/eval
@@ -40,6 +35,8 @@ v9.2 → v9.3 根本原因修正：
 """
 from __future__ import annotations
 
+import ctypes
+import gc
 import re
 import warnings
 import numpy as np
@@ -52,13 +49,28 @@ RDLogger.DisableLog("rdApp.*")
 
 from qmg.utils.chemistry_data_processing import MoleculeQuantumStateGenerator
 from qmg.utils.weight_generator import ConditionalWeightsGenerator
-# ★ v9.3：直接使用 build_dynamic_circuit_cudaq.py 的 _qmg_n9（v9.1 分號修正版）
-#         _qmg_n9 每個語句各佔獨立一行，MLIR 編譯完整，list[float] 型別元資料正確。
 from qmg.utils.build_dynamic_circuit_cudaq import DynamicCircuitBuilderCUDAQ, _qmg_n9
 
 
 # ===========================================================================
-# 90 個命名暫存器（與 build_dynamic_circuit_cudaq.py 的 _qmg_n9 mz() 命名完全對應）
+# 記憶體工具（v9.4 新增）
+# ===========================================================================
+
+def _free_cpp_heap() -> None:
+    """
+    強制 glibc 將 C++ heap 已釋放的記憶體歸還給 OS。
+    CUDA-Q 0.7.1 的 pybind11 C++ binding 不會主動釋放，
+    需呼叫 malloc_trim(0) 才能讓 RSS 下降。
+    在非 glibc 環境（macOS / musl）靜默忽略。
+    """
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
+# ===========================================================================
+# 90 個命名暫存器（與 build_dynamic_circuit_cudaq.py 的 _qmg_n9 完全對應）
 # ===========================================================================
 
 _N9_ALL_REGS: list[str] = [
@@ -81,7 +93,7 @@ assert len(_N9_ALL_REGS) == 90
 
 
 # ===========================================================================
-# smoke test kernel（file-level 定義，可被正確 inspect）
+# smoke test kernel
 # ===========================================================================
 
 @cudaq.kernel
@@ -108,7 +120,6 @@ def _check_cudaq_version_volta_compat() -> tuple[str, bool]:
 
 
 def _gpu_target_available() -> bool:
-    """正確檢查 nvidia target 是否可用（修正 0.7.1 target string 帶 newline 的 bug）。"""
     try:
         for t in cudaq.get_targets():
             name = str(t).split('\n')[0].replace('Target', '').strip()
@@ -122,7 +133,11 @@ def _gpu_target_available() -> bool:
 def _verify_gpu_smoke() -> bool:
     try:
         result = cudaq.sample(_smoke_kernel_v9, shots_count=16)
-        return len(dict(result.items())) > 0
+        ok = len(dict(result.items())) > 0
+        del result
+        gc.collect()
+        _free_cpp_heap()
+        return ok
     except Exception as e:
         warnings.warn(f"[CUDAQ] GPU smoke test 失敗：{e}")
         return False
@@ -160,16 +175,69 @@ def _set_target_safe(target_name: str) -> str:
 
 
 # ===========================================================================
-# 90-bit bitstring 重建
+# 90-bit bitstring 重建（v9.4 低記憶體版）
 # ===========================================================================
 
 def _reconstruct_bitstrings_n9(result) -> dict[str, int]:
-    """用 90 個命名暫存器重建 bitstring。
-    _qmg_n9 (v9.1) 每個 mz() 各佔獨立行，AST 正確識別所有 register 名稱。
+    """
+    用 90 個命名暫存器重建 bitstring。
+
+    v9.4 記憶體優化：
+      原版一次讀入所有 90 個 register list（reg_data dict），
+      在 Python heap 上同時持有 90 * n_shots 個字串物件，
+      高峰記憶體 ~80-120 MB（n_shots=10000）。
+
+      優化方案：
+        1. 先取第一個 register 確認 n_shots
+        2. 預先建立一個 n_shots × 90 的 bytearray buffer
+        3. 逐 register 讀取後立即存入 buffer 並釋放 list
+        4. 從 bytearray 組裝 bitstring，計算 counts
+        5. 不保留整個 reg_data dict → 高峰記憶體降至 ~20-30 MB
     """
     try:
-        reg_data = {reg: result.get_sequential_data(reg) for reg in _N9_ALL_REGS}
+        # Step 1: 確認 n_shots
+        first_data = result.get_sequential_data(_N9_ALL_REGS[0])
+        n_shots = len(first_data)
+        if n_shots == 0:
+            warnings.warn("[CUDAQ] n_shots=0。")
+            return {}
+
+        # Step 2: 預建 bytearray buffer（0=False/|0>, 1=True/|1>）
+        # shape: n_shots × 90，每個 shot 佔 90 bytes
+        buf = bytearray(n_shots * 90)
+
+        # Step 3: 第 0 個 register 已讀入 first_data，直接填入
+        for i, bit in enumerate(first_data):
+            buf[i * 90] = 1 if bit else 0
+        del first_data  # 立即釋放
+
+        # Step 4: 逐 register 讀取填入 buffer，不保留整個 dict
+        for reg_idx, reg in enumerate(_N9_ALL_REGS[1:], start=1):
+            reg_data = result.get_sequential_data(reg)
+            for i, bit in enumerate(reg_data):
+                buf[i * 90 + reg_idx] = 1 if bit else 0
+            del reg_data  # 立即釋放，不累積
+
+        # Step 5: 從 buffer 組裝 bitstring 並計數
+        counts: dict[str, int] = {}
+        malformed = 0
+        for i in range(n_shots):
+            # 直接從 bytearray slice 建立字串，避免 join 中間物件
+            row = buf[i * 90: i * 90 + 90]
+            if len(row) != 90:
+                malformed += 1
+                continue
+            bs = ''.join('1' if b else '0' for b in row)
+            counts[bs] = counts.get(bs, 0) + 1
+
+        del buf  # 釋放 bytearray
+
+        if malformed:
+            warnings.warn(f"[CUDAQ] {malformed}/{n_shots} shots bitstring 長度異常。")
+        return counts
+
     except AttributeError:
+        # get_sequential_data() 不存在 → fallback to items()
         warnings.warn("[CUDAQ] get_sequential_data() 不存在，使用 items() fallback。")
         counts: dict[str, int] = {}
         for bs_raw, cnt in result.items():
@@ -177,36 +245,21 @@ def _reconstruct_bitstrings_n9(result) -> dict[str, int]:
                 counts[bs_raw] = counts.get(bs_raw, 0) + cnt
         return counts
     except Exception as e:
-        warnings.warn(f"[CUDAQ] get_sequential_data() 失敗：{e}")
+        warnings.warn(f"[CUDAQ] _reconstruct_bitstrings_n9 失敗：{e}")
         return {}
-
-    n_shots = len(reg_data.get('a1_0', []))
-    if n_shots == 0:
-        warnings.warn("[CUDAQ] n_shots=0。")
-        return {}
-
-    counts: dict[str, int] = {}
-    malformed = 0
-    for i in range(n_shots):
-        bs = ''.join(reg_data[reg][i] for reg in _N9_ALL_REGS)
-        if len(bs) != 90:
-            malformed += 1
-            continue
-        counts[bs] = counts.get(bs, 0) + 1
-    if malformed:
-        warnings.warn(f"[CUDAQ] {malformed}/{n_shots} shots bitstring 長度異常。")
-    return counts
 
 
 # ===========================================================================
-# MoleculeGeneratorCUDAQ  (v9.3)
+# MoleculeGeneratorCUDAQ  (v9.4)
 # ===========================================================================
 
 class MoleculeGeneratorCUDAQ:
-    """CUDA-Q 版分子生成器（CUDA-Q 0.7.1 / V100 sm_70，v9.3）。
+    """CUDA-Q 版分子生成器（CUDA-Q 0.7.1 / V100 sm_70，v9.4）。
 
-    v9.3 修正：使用 build_dynamic_circuit_cudaq._qmg_n9（v9.1 分號修正版）
-    取代有問題的 _qmg_n9_v9，解決 list[float] broadcast dispatch 錯誤。
+    v9.4 記憶體修正（OOM Kill 修復）：
+      1. sample_molecule() 結尾加入 del result → gc.collect() → malloc_trim(0)
+      2. _reconstruct_bitstrings_n9 改為低記憶體逐 register 讀取模式
+      3. sample_molecule() 結尾加入 smiles 處理後的中間物件釋放
     """
 
     def __init__(
@@ -224,18 +277,17 @@ class MoleculeGeneratorCUDAQ:
         if num_heavy_atom != 9:
             raise NotImplementedError(f"目前僅支援 num_heavy_atom=9。")
 
-        self.num_heavy_atom           = num_heavy_atom
-        self.all_weight_vector        = (
+        self.num_heavy_atom            = num_heavy_atom
+        self.all_weight_vector         = (
             np.array(all_weight_vector, dtype=np.float64)
             if all_weight_vector is not None else None
         )
-        self.backend_name             = backend_name
+        self.backend_name              = backend_name
         self.remove_bond_disconnection = remove_bond_disconnection
-        self.length_all_weight_vector = int(
+        self.length_all_weight_vector  = int(
             8 + (num_heavy_atom - 2) * (num_heavy_atom + 3) * 3 / 2
         )  # 134
 
-        # DynamicCircuitBuilderCUDAQ：用於 prepare_weights / apply_bond_disconnection
         self.circuit_builder = DynamicCircuitBuilderCUDAQ(
             num_heavy_atom            = num_heavy_atom,
             temperature               = temperature,
@@ -248,21 +300,17 @@ class MoleculeGeneratorCUDAQ:
 
         actual_target       = _CUDAQ_TARGET_MAP.get(backend_name, "qpp-cpu")
         self._active_target = _set_target_safe(actual_target)
-
-        # ★ v9.3：使用 build_dynamic_circuit_cudaq._qmg_n9（v9.1 分號修正版）
-        #   根本原因：_qmg_n9_v9 的分號語法導致 MLIR 型別元資料遺失 → broadcast 錯誤
-        #   修正：_qmg_n9 每個語句各佔獨立一行，MLIR 完整，list[float] 正確解析
-        self._kernel = _qmg_n9
+        self._kernel        = _qmg_n9
 
         ver_str, _ = _check_cudaq_version_volta_compat()
         print(
-            f"[CUDAQ] Generator initialized (v9.3).\n"
+            f"[CUDAQ] Generator initialized (v9.4).\n"
             f"  cudaq version  : {ver_str}\n"
             f"  active target  : {self._active_target}\n"
             f"  GPU available  : {_gpu_target_available()}\n"
-            f"  kernel         : _qmg_n9 (build_dynamic_circuit_cudaq v9.1, "
-            f"semicolon-free, MLIR type metadata intact)\n"
-            f"  reconstruction : 90 named registers"
+            f"  kernel         : _qmg_n9 (v9.1 semicolon-free)\n"
+            f"  reconstruction : 90 named registers (low-memory mode)\n"
+            f"  memory mgmt    : malloc_trim enabled ✓"
         )
 
     def update_weight_vector(self, w: Union[List[float], np.ndarray]) -> None:
@@ -280,14 +328,24 @@ class MoleculeGeneratorCUDAQ:
 
         w_list = self.circuit_builder.prepare_weights(w)
 
-        # ★ v9.3：_qmg_n9 的 list[float] 型別元資料完整，broadcast 不觸發
+        # ── 量子電路採樣 ─────────────────────────────────────────────────
         result = cudaq.sample(self._kernel, w_list, shots_count=num_sample)
 
+        # ── bitstring 重建（低記憶體逐 register 模式）────────────────────
         raw_counts = _reconstruct_bitstrings_n9(result)
+
+        # ★ v9.4 Fix-1：明確刪除 result，觸發 C++ SampleResult 析構
+        #   不能依賴 GC 時機，必須立即 del
+        del result
+        del w_list
+        gc.collect()
+        _free_cpp_heap()   # 將 C++ heap 已釋放記憶體歸還 OS
+
         if not raw_counts:
             warnings.warn("[CUDAQ] raw_counts 為空，validity=0。")
             return {}, 0.0, 0.0
 
+        # ── SMILES 轉換 ───────────────────────────────────────────────────
         smiles_dict: dict[str, int] = {}
         num_valid = 0
         for bs, cnt in raw_counts.items():
@@ -297,6 +355,10 @@ class MoleculeGeneratorCUDAQ:
             smiles_dict[smi] = smiles_dict.get(smi, 0) + cnt
             if smi and smi != "None":
                 num_valid += cnt
+
+        # ★ v9.4 Fix-2：釋放中間物件
+        del raw_counts
+        gc.collect()
 
         validity   = num_valid / num_sample
         n_unique   = len([k for k in smiles_dict if k and k != "None"])
@@ -312,7 +374,7 @@ MoleculeGenerator = MoleculeGeneratorCUDAQ
 # ===========================================================================
 if __name__ == "__main__":
     import time
-    print("=== MoleculeGeneratorCUDAQ 功能驗證 (v9.3) ===")
+    print("=== MoleculeGeneratorCUDAQ 功能驗證 (v9.4) ===")
     ver_str, is_compat = _check_cudaq_version_volta_compat()
     print(f"CUDA-Q: {ver_str}  V100 compat: {'✓' if is_compat else '⚠'}")
     print(f"GPU target 可用: {_gpu_target_available()}")
