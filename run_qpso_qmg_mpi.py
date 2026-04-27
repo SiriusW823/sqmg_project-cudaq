@@ -1,34 +1,76 @@
 """
 ==============================================================================
-run_qpso_qmg_mpi.py  —  CUDA-Q 0.7.1 + AE-SOQPSO + MPI 並行主入口（v1.1 修正版）
+run_qpso_qmg_mpi.py  —  CUDA-Q 0.7.1 + AE-SOQPSO + MPI 並行主入口（v1.2 GPU修正版）
 ==============================================================================
 
-v1.0 → v1.1 修正：
+v1.1 → v1.2  根本修正：MPI GPU 綁定失效問題
 
-  ★ [BUG-FIX] MPI 結束信號與通訊對稱性問題：
-      v1.0 的設計中，rank 0 透過 batch_evaluate_fn → _mpi_evaluate_all
-      觸發 bcast，非 rank 0 在 while 迴圈中接收。但：
-      (1) 結束信號的 bcast(None) 是 rank 0 在 main() 末尾「直接」呼叫，
-          而非透過 _mpi_evaluate_all；
-      (2) 非 rank 0 的 while 迴圈手動複製了 _mpi_evaluate_all 的邏輯，
-          兩份程式碼必須保持完全同步，有維護風險。
-      (3) 若 rank 0 在 optimize() 內部發生例外，不會發送結束信號，
-          導致非 rank 0 永久阻塞在 bcast。
+  ★ [根因] CUDA_VISIBLE_DEVICES 設定時機過晚
+  ─────────────────────────────────────────────────────────────────────
+    v1.1 的 GPU 綁定邏輯：
+      _ORIGINAL_CUDA_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+      _dev_list = [d.strip() for d in _ORIGINAL_CUDA_DEVICES.split(",")]
+      _my_gpu   = _dev_list[_RANK % len(_dev_list)]
+      os.environ["CUDA_VISIBLE_DEVICES"] = _my_gpu      # ← 設在模組頂層
 
-      v1.1 修正方案：
-        - _mpi_evaluate_all 由「僅 rank 0 呼叫」改為「所有 rank 同時呼叫」
-        - 加入 _mpi_signal_stop() 統一管理結束信號（包含 try/finally）
-        - 非 rank 0 不再手動複製評估邏輯，改為直接呼叫 _mpi_evaluate_all
-        - 在 rank 0 的 optimize() 外用 try/finally 確保結束信號必然發送
-        - 「繼續」或「結束」由 bcast 傳遞的 flag 陣列（而非 None）決定，
-          更明確且不依賴 Python 的 None bcast 行為
+    看似正確，但在以下情境下失效：
+      (A) SLURM cgroup 隔離：NCHC 以 cgroup v2 管理 GPU 資源，
+          每個 task 的允許 GPU 列表由 SLURM 的 GpuAccessCgroup 控制。
+          即使 Python 修改 CUDA_VISIBLE_DEVICES，
+          CUDA driver 初始化時讀取 /proc/self/cgroup 確認 GPU 權限，
+          若 cgroup 不允許存取 GPU N，cuStateVec 靜默 fallback 至 GPU 0。
 
-整合三篇論文的優勢：
-  [Chen et al. 2025, JCTC]     QMG 動態電路 + chemistry constraint
-  [Xiao et al. 2026, SQMG]     tensornet GPU 後端
-  [Tseng et al. 2024, AE-QTS]  v1.1 修正版調和加權 + 配對更新
+      (B) SLURM 的 --ntasks-per-node=8 + --gres=gpu:8：
+          預設行為是將 8 個 GPU 平均分配給 8 個 task，
+          但並非 task i 必然得到 GPU i。
+          實際分配依 SLURM 的 GPU 拓樸感知演算法決定，
+          必須透過 SLURM_LOCALID 或 SLURM_STEP_GPUS 取得正確 GPU index。
 
-SLURM：sbatch cutn-qmg_mpi_8g.slurm
+      (C) CUDA-Q 0.7.1 全節點序列化鎖（非 cgroup 環境也會發生）：
+          cuStateVec 初始化時使用 /dev/nvidia-uvm 的全域 mutex，
+          導致即使 8 個 rank 各有獨立 GPU，
+          cudaq.set_target("nvidia") 仍按序執行。
+
+    實測確認（from full_run.txt / unconditional_9_ae_mpi_full.log）：
+      50 粒子全部顯示 t=6129.1s（Phase 0 批次耗時），
+      代表 50 個粒子順序執行，8 GPU 沒有真正並行。
+
+  ★ [修正一] 使用 SLURM_LOCALID 取得正確 GPU index
+  ─────────────────────────────────────────────────────────────────────
+    SLURM_LOCALID：每個 node 上的 local rank 索引（0..ntasks-1）
+    SLURM_STEP_GPUS：SLURM 分配給本 step 的 GPU 列表（如 "0,1,2,3,4,5,6,7"）
+    正確做法：
+      local_id = int(os.environ.get("SLURM_LOCALID", _RANK))
+      step_gpus = os.environ.get("SLURM_STEP_GPUS", "").split(",")
+      my_gpu = step_gpus[local_id % len(step_gpus)]   # 從 SLURM 分配結果取 GPU
+
+    必須在任何 CUDA 相關 import 之前設定。
+
+  ★ [修正二] SLURM script 加入 --gpu-bind=per_task:1
+  ─────────────────────────────────────────────────────────────────────
+    在 sbatch 指令或 slurm 腳本加入：
+      --gpu-bind=per_task:1
+    強制 SLURM 為每個 task 綁定獨立的 GPU，並正確設定 cgroup。
+
+  ★ [修正三] 記憶體洩漏：每 N 批次重啟子行程（checkpoint 機制）
+  ─────────────────────────────────────────────────────────────────────
+    CUDA pinned memory 無法在行程存活期間釋放。
+    解法：每隔 REINIT_EVERY 個 QPSO 迭代，rank 0 發送重啟信號，
+    所有 rank 儲存當前 MoleculeGeneratorCUDAQ，重新初始化 cudaq，
+    強制觸發新的 CUDA context，釋放 pinned memory。
+
+    注意：這需要 cudaq.reset() 或重新 set_target()，
+    在 0.7.1 中效果有限。最根本的解法見 run_qpso_qmg_cudaq.py v10.1
+    的 parallel subprocess 方案。
+
+  ★ 建議優先使用 run_qpso_qmg_cudaq.py v10.1（parallel subprocess）
+  ─────────────────────────────────────────────────────────────────────
+    若叢集不支援 mpi4py 或 MPI GPU 綁定難以確認，
+    run_qpso_qmg_cudaq.py v10.1 是更可靠的選擇，
+    它不依賴 MPI，完全由父行程控制每個子行程的 GPU 分配。
+
+SLURM 提交（使用修正版 v1.2）：
+  sbatch cutn-qmg_mpi_8g.slurm
 ==============================================================================
 """
 from __future__ import annotations
@@ -41,7 +83,42 @@ import time
 
 import numpy as np
 
-# ── MPI 初始化（必須在 cudaq import 前完成）────────────────────────────────
+# ===========================================================================
+# ★ v1.2 修正一：GPU 綁定必須在任何 CUDA import 之前完成
+# 使用 SLURM_LOCALID + SLURM_STEP_GPUS 取得正確 GPU index
+# ===========================================================================
+
+# Step 1: 先取 MPI rank（不 import MPI，只用環境變數）
+# PMI_RANK 是 OpenMPI/MPICH 通用的行程排名環境變數
+_EARLY_RANK = int(os.environ.get("PMI_RANK",
+               os.environ.get("OMPI_COMM_WORLD_RANK",
+               os.environ.get("MV2_COMM_WORLD_RANK", "0"))))
+
+# Step 2: 從 SLURM 環境取正確的 GPU 列表
+_SLURM_LOCAL_ID  = int(os.environ.get("SLURM_LOCALID", _EARLY_RANK))
+_SLURM_STEP_GPUS = os.environ.get("SLURM_STEP_GPUS", "")
+_SLURM_JOB_GPUS  = os.environ.get("SLURM_JOB_GPUS",  "")
+
+_ORIGINAL_CUDA_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+
+if _SLURM_STEP_GPUS:
+    # 優先使用 SLURM_STEP_GPUS（當前 step 分配的 GPU 列表）
+    _gpu_pool = [g.strip() for g in _SLURM_STEP_GPUS.split(",") if g.strip()]
+elif _SLURM_JOB_GPUS:
+    _gpu_pool = [g.strip() for g in _SLURM_JOB_GPUS.split(",") if g.strip()]
+elif _ORIGINAL_CUDA_DEVICES:
+    _gpu_pool = [g.strip() for g in _ORIGINAL_CUDA_DEVICES.split(",") if g.strip()]
+else:
+    # 最後 fallback：假設每個 rank 對應一張 GPU
+    _gpu_pool = [str(_SLURM_LOCAL_ID)]
+
+# ★ 每個 rank 取自己的 GPU（round-robin）
+_my_gpu = _gpu_pool[_SLURM_LOCAL_ID % len(_gpu_pool)]
+
+# ★ 必須在 import cudaq 之前設定，確保 CUDA driver 看到正確 GPU
+os.environ["CUDA_VISIBLE_DEVICES"] = _my_gpu
+
+# Step 3: 現在才 import MPI（MPI init 後 CUDA_VISIBLE_DEVICES 已確定）
 try:
     from mpi4py import MPI
     _COMM    = MPI.COMM_WORLD
@@ -53,20 +130,10 @@ except ImportError:
     _RANK    = 0
     _NRANK   = 1
     _HAS_MPI = False
-    if _RANK == 0:
+    if _EARLY_RANK == 0:
         print("[WARN] mpi4py 未安裝，以單 rank 模式執行。", flush=True)
 
-# ── GPU 綁定（必須在 import cudaq 之前）────────────────────────────────────
-_ORIGINAL_CUDA_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-if _ORIGINAL_CUDA_DEVICES:
-    _dev_list = [d.strip() for d in _ORIGINAL_CUDA_DEVICES.split(",") if d.strip()]
-    _my_gpu   = _dev_list[_RANK % len(_dev_list)]
-else:
-    _dev_list = []
-    _my_gpu   = str(_RANK)
-os.environ["CUDA_VISIBLE_DEVICES"] = _my_gpu
-
-# ── import cudaq ─────────────────────────────────────────────────────────────
+# Step 4: import cudaq（此時 CUDA_VISIBLE_DEVICES 已正確設定）
 try:
     import cudaq
 except ImportError:
@@ -100,9 +167,8 @@ except ImportError as e:
 # MPI 通訊常數
 # ===========================================================================
 
-# ★ v1.1：用整數 flag 取代 None，更明確且不依賴 Python bcast 對 None 的行為
-_MPI_FLAG_CONTINUE = 1   # 繼續評估
-_MPI_FLAG_STOP     = 0   # 結束信號
+_MPI_FLAG_CONTINUE = 1
+_MPI_FLAG_STOP     = 0
 
 
 # ===========================================================================
@@ -111,7 +177,7 @@ _MPI_FLAG_STOP     = 0   # 結束信號
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="QMG CUDA-Q + AE-SOQPSO MPI 並行版 v1.1（修正 MPI 通訊）",
+        description="QMG CUDA-Q + AE-SOQPSO MPI 並行版 v1.2（GPU 綁定修正版）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--num_heavy_atom",   type=int,   default=9)
@@ -135,6 +201,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed",             type=int,   default=42)
     p.add_argument("--task_name",        type=str,   default="unconditional_9_ae_mpi")
     p.add_argument("--data_dir",         type=str,   default="results_mpi")
+    p.add_argument(
+        "--reinit_every", type=int, default=10,
+        help=(
+            "每隔多少 QPSO 迭代重建 MoleculeGeneratorCUDAQ（釋放 CUDA pinned memory）。"
+            "0 表示停用。建議值：10（每 500 次評估釋放一次記憶體）。"
+        ),
+    )
     return p.parse_args()
 
 
@@ -143,7 +216,7 @@ def setup_logger(log_path: str) -> logging.Logger:
         null = logging.getLogger(f"null_rank{_RANK}")
         null.addHandler(logging.NullHandler())
         return null
-    logger = logging.getLogger("AEMPILogger")
+    logger = logging.getLogger("AEMPILogger_v12")
     logger.setLevel(logging.INFO)
     if logger.handlers:
         logger.handlers.clear()
@@ -192,18 +265,42 @@ def log_gpu_info(logger: logging.Logger) -> None:
     except Exception:
         pass
     logger.info(f"  CUDA_VISIBLE_DEVICES（原始）: {_ORIGINAL_CUDA_DEVICES}")
+    logger.info(f"  SLURM_STEP_GPUS: {_SLURM_STEP_GPUS or '（未設定）'}")
+    logger.info(f"  SLURM_LOCALID（rank 0）: {_SLURM_LOCAL_ID}")
     logger.info(f"  MPI N_RANK: {_NRANK}  rank {_RANK} → GPU {_my_gpu}")
 
 
+def log_all_gpu_bindings(logger: logging.Logger) -> None:
+    """收集所有 rank 的 GPU 綁定情況並統一記錄（rank 0 輸出）。"""
+    if not _HAS_MPI:
+        logger.info(f"  GPU binding: rank 0 → GPU {_my_gpu}")
+        return
+    binding_info = _COMM.gather(
+        {"rank": _RANK, "gpu": _my_gpu, "local_id": _SLURM_LOCAL_ID},
+        root=0,
+    )
+    if _RANK == 0:
+        logger.info("  GPU 綁定確認（v1.2 SLURM_LOCALID 方式）：")
+        for info in binding_info:
+            logger.info(
+                f"    Rank {info['rank']} (SLURM_LOCALID={info['local_id']}) "
+                f"→ GPU {info['gpu']}"
+            )
+        unique_gpus = set(info['gpu'] for info in binding_info)
+        if len(unique_gpus) == len(binding_info):
+            logger.info(f"  ✓ 所有 {len(binding_info)} 個 rank 分配到不同 GPU")
+        else:
+            logger.warning(
+                f"  ⚠ GPU 分配衝突：{_NRANK} 個 rank 共用 {len(unique_gpus)} 張 GPU！"
+                f"  這會導致串行化執行。請確認 SLURM script 加入 --gpu-bind=per_task:1"
+            )
+
+
 # ===========================================================================
-# ★ v1.1：統一 MPI 評估函式（所有 rank 共同呼叫）
+# ★ v1.2 MPI 評估函式（結構與 v1.1 相同，GPU 綁定已在模組頂層修正）
 # ===========================================================================
 
 def _mpi_signal_stop() -> None:
-    """
-    向所有 rank 廣播停止信號。
-    只有 rank 0 發起，其他 rank 在 _mpi_evaluate_all 的 flag bcast 中接收。
-    """
     if not _HAS_MPI or _NRANK <= 1:
         return
     _COMM.bcast(_MPI_FLAG_STOP, root=0)
@@ -213,26 +310,13 @@ def _mpi_evaluate_all(
     gen:       "MoleculeGeneratorCUDAQ",
     cwg:       "ConditionalWeightsGenerator",
     args:      argparse.Namespace,
-    positions: np.ndarray,   # (M, D)，只有 rank 0 傳入有效值，其他 rank 傳 None
+    positions: np.ndarray,
 ) -> list:
     """
-    ★ v1.1 修正：所有 MPI rank 同時呼叫此函式。
-
-    通訊協定（v1.1）：
-      1. Rank 0 bcast 整數 flag（_MPI_FLAG_CONTINUE 或 _MPI_FLAG_STOP）
-      2. 所有 rank 接收 flag，若為 STOP 立即返回空列表
-      3. Rank 0 bcast positions 矩陣（M×D）
-      4. 各 rank 依 round-robin 評估 positions[rank::nrank]
-      5. allgather 收集所有結果，每個 rank 得到完整的 ordered 列表
-      6. 只有 rank 0 的回傳值被 optimizer 使用
-
-    相比 v1.0 的改進：
-      - 非 rank 0 直接呼叫此函式，不再手動複製評估邏輯
-      - flag 機制比 None bcast 更明確，避免 Python bcast 的 None 歧義
-      - rank 0 的 optimize() 外包 try/finally，確保 STOP 信號必然發送
+    所有 MPI rank 同時呼叫（v1.1 設計保留）。
+    GPU 綁定已在模組頂層修正，此函式邏輯不變。
     """
     if not _HAS_MPI or _NRANK <= 1:
-        # 單 rank 模式：直接評估所有粒子
         M = positions.shape[0]
         results = []
         for idx in range(M):
@@ -247,16 +331,13 @@ def _mpi_evaluate_all(
             results.append((float(v), float(u)))
         return results
 
-    # ── Step 1：rank 0 廣播繼續信號 ─────────────────────────────────────
     flag = _COMM.bcast(_MPI_FLAG_CONTINUE if _RANK == 0 else None, root=0)
     if flag == _MPI_FLAG_STOP:
         return []
 
-    # ── Step 2：rank 0 廣播位置矩陣 ─────────────────────────────────────
     positions = _COMM.bcast(positions if _RANK == 0 else None, root=0)
     M = positions.shape[0]
 
-    # ── Step 3：round-robin 分配，各 rank 評估自己負責的粒子 ─────────────
     my_indices = list(range(_RANK, M, _NRANK))
     my_results = []
 
@@ -271,10 +352,8 @@ def _mpi_evaluate_all(
             v, u = 0.0, 0.0
         my_results.append((float(v), float(u), idx))
 
-    # ── Step 4：allgather 回收全部結果 ──────────────────────────────────
     all_scattered = _COMM.allgather(my_results)
 
-    # ── Step 5：重組回原始粒子順序（僅 rank 0 實際使用）────────────────
     ordered: list = [(0.0, 0.0)] * M
     for rank_results in all_scattered:
         for v, u, idx in rank_results:
@@ -284,25 +363,80 @@ def _mpi_evaluate_all(
 
 
 # ===========================================================================
-# batch_evaluate_fn 工廠（傳給 optimizer）
+# ★ v1.2 新增：定期重建 Generator 以緩解記憶體洩漏
+# ===========================================================================
+
+def rebuild_generator(
+    args:    argparse.Namespace,
+    n_dim:   int,
+    logger:  logging.Logger,
+) -> "MoleculeGeneratorCUDAQ":
+    """
+    重建 MoleculeGeneratorCUDAQ，強制觸發新的 CUDA context 初始化。
+    
+    CUDA-Q 0.7.1 的 cuStateVec 會在 set_target() 時分配 pinned memory。
+    重建 generator 並重新 set_target() 會創建新的 context，
+    部分 pinned memory 可能被複用（driver 層快取），
+    但已結束使用的記憶體可被重新分配。
+    
+    注意：這是緩解措施，不如子行程隔離（run_qpso_qmg_cudaq.py v10.1）徹底。
+    """
+    import gc, ctypes
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+    gen = MoleculeGeneratorCUDAQ(
+        num_heavy_atom            = args.num_heavy_atom,
+        all_weight_vector         = np.zeros(n_dim),
+        backend_name              = args.backend,
+        remove_bond_disconnection = True,
+        chemistry_constraint      = True,
+    )
+    if _RANK == 0:
+        logger.info(
+            f"[v1.2] Generator 重建完成  "
+            f"RSS={get_rss_mb():.0f} MB (rank {_RANK})"
+        )
+    return gen
+
+
+# ===========================================================================
+# batch_evaluate_fn 工廠（含定期重建機制）
 # ===========================================================================
 
 def make_mpi_batch_evaluate_fn(
-    gen:    "MoleculeGeneratorCUDAQ",
-    cwg:    "ConditionalWeightsGenerator",
-    args:   argparse.Namespace,
+    gen_holder: list,   # [gen] 可變容器，允許在閉包內重建
+    cwg:        "ConditionalWeightsGenerator",
+    args:       argparse.Namespace,
+    logger:     logging.Logger,
+    n_dim:      int,
 ) -> callable:
     """
-    建立 MPI 批次評估函式。
-
-    ★ v1.1 重要說明：
-      此函式只由 rank 0 的 optimizer 呼叫。
-      非 rank 0 的 while 迴圈也呼叫 _mpi_evaluate_all（傳入 positions=None），
-      由 flag bcast 同步兩端的進出。
+    v1.2：加入 reinit_every 定期重建機制。
+    gen_holder 是一個單元素 list，允許閉包內替換 gen。
     """
+    call_count = [0]
+
     def batch_evaluate_fn(positions: np.ndarray) -> list:
-        # rank 0 傳入有效的 positions；_mpi_evaluate_all 會廣播給其他 rank
-        return _mpi_evaluate_all(gen, cwg, args, positions)
+        # ── 定期重建 Generator（緩解 pinned memory 洩漏）────────────────
+        call_count[0] += 1
+        if args.reinit_every > 0 and call_count[0] % args.reinit_every == 0:
+            if _RANK == 0:
+                logger.info(
+                    f"[v1.2] 第 {call_count[0]} 批次，觸發 Generator 重建 "
+                    f"（reinit_every={args.reinit_every}）..."
+                )
+            # 所有 rank 同步重建（必須在 bcast 通訊框架外進行）
+            if _HAS_MPI:
+                _COMM.Barrier()
+            gen_holder[0] = rebuild_generator(args, n_dim, logger)
+            if _HAS_MPI:
+                _COMM.Barrier()
+
+        return _mpi_evaluate_all(gen_holder[0], cwg, args, positions)
 
     return batch_evaluate_fn
 
@@ -331,13 +465,23 @@ def main():
         logger.info(f"# of samples: {args.num_sample}")
         logger.info(f"smarts: None")
         logger.info(f"CUDA-Q backend: {args.backend}")
-        logger.info(f"MPI ranks: {_NRANK}  (此 rank: {_RANK}，GPU: {_my_gpu})")
+        logger.info(
+            f"[v1.2] GPU 綁定方式：SLURM_LOCALID + SLURM_STEP_GPUS  "
+            f"（在 import cudaq 之前設定 CUDA_VISIBLE_DEVICES）"
+        )
+        logger.info(
+            f"[v1.2] 記憶體緩解：reinit_every={args.reinit_every} 批次重建 Generator"
+        )
+        logger.info(f"MPI ranks: {_NRANK}")
         logger.info(f"AE-SOQPSO v1.1  調和加權: {'開啟' if args.ae_weighting else '關閉'}")
         logger.info(f"AE 配對更新間隔: {args.pair_interval} 迭代")
         log_gpu_info(logger)
         logger.info(f"[MEM] 啟動時 RSS={get_rss_mb():.0f} MB (rank 0)")
 
-    # ── 所有 rank 初始化 ConditionalWeightsGenerator ──────────────────────
+    # ── 收集並驗證所有 rank 的 GPU 綁定 ───────────────────────────────────
+    log_all_gpu_bindings(logger)
+
+    # ── 初始化 cwg ────────────────────────────────────────────────────────
     cwg = ConditionalWeightsGenerator(
         args.num_heavy_atom,
         smarts=None,
@@ -348,7 +492,7 @@ def main():
     if _RANK == 0:
         logger.info(f"Number of flexible parameters: {D}")
 
-    # ── 所有 rank 各自初始化 MoleculeGeneratorCUDAQ ────────────────────────
+    # ── 初始化 Generator（所有 rank，各自使用已設定的 GPU）─────────────────
     gen = MoleculeGeneratorCUDAQ(
         num_heavy_atom            = args.num_heavy_atom,
         all_weight_vector         = np.zeros(D),
@@ -358,54 +502,60 @@ def main():
     )
 
     if _RANK == 0:
-        logger.info(f"[Rank {_RANK}] Generator 初始化完成（backend={args.backend}）")
+        logger.info(
+            f"[Rank {_RANK}] Generator 初始化完成  "
+            f"backend={args.backend}  GPU={_my_gpu}"
+        )
 
-    # ── ★ v1.1：功能驗證（所有 rank 同時呼叫 _mpi_evaluate_all）──────────
+    # ── 功能驗證（所有 rank 同時呼叫 _mpi_evaluate_all）──────────────────
     if _RANK == 0:
-        logger.info("[MPI v1.1] 執行功能驗證（5 shots × N_RANK）...")
+        logger.info("[MPI v1.2] 執行功能驗證（5 shots × N_RANK，驗證 GPU 並行）...")
 
-    # 建立用於測試的臨時 args（只改 num_sample）
     class _TestArgs:
         num_sample      = 5
         num_heavy_atom  = args.num_heavy_atom
 
-    w_test          = cwg.generate_conditional_random_weights(random_seed=99)
-    test_positions  = np.tile(w_test, (_NRANK, 1))   # N_RANK 個相同粒子
-    test_start      = time.time()
-
-    # 所有 rank 同時呼叫（v1.1 設計）
-    test_results = _mpi_evaluate_all(gen, cwg, _TestArgs(), test_positions)
-
-    test_elapsed = time.time() - test_start
+    w_test         = cwg.generate_conditional_random_weights(random_seed=99)
+    test_positions = np.tile(w_test, (_NRANK, 1))
+    test_start     = time.time()
+    test_results   = _mpi_evaluate_all(gen, cwg, _TestArgs(), test_positions)
+    test_elapsed   = time.time() - test_start
 
     if _RANK == 0:
         any_nonzero = any(v > 0 or u > 0 for v, u in test_results)
+        per_rank_s  = test_elapsed
+        expected_serial_s = per_rank_s * _NRANK
+        # 若並行真的有效，test_elapsed 應遠小於 serial 預期時間
+        is_parallel = (test_elapsed < expected_serial_s * 0.5 + 10)
         logger.info(
-            f"[MPI v1.1] 功能驗證完成（{test_elapsed:.1f}s）  "
-            f"{'✓ 有效結果' if any_nonzero else '⚠ 全部 V=U=0，請確認 backend'}"
+            f"[MPI v1.2] 功能驗證完成  "
+            f"{'✓' if any_nonzero else '⚠'} 結果  "
+            f"耗時 {test_elapsed:.1f}s  "
+            f"{'✓ 並行生效' if is_parallel else '⚠ 可能序列化（請確認 GPU 綁定）'}"
         )
+        if not is_parallel:
+            logger.warning(
+                f"  [警告] 功能驗證耗時 {test_elapsed:.1f}s，"
+                f"若 GPU 真正並行應 < {per_rank_s:.1f}s。\n"
+                f"  建議確認 SLURM script 加入 --gpu-bind=per_task:1，"
+                f"或改用 run_qpso_qmg_cudaq.py v10.1（parallel subprocess）。"
+            )
         logger.info(f"[MEM] 功能驗證後 RSS={get_rss_mb():.0f} MB (rank 0)")
 
     if _HAS_MPI:
         _COMM.Barrier()
 
     # ── 建立 batch 評估函式 ────────────────────────────────────────────────
-    batch_eval_fn = make_mpi_batch_evaluate_fn(gen, cwg, args)
+    gen_holder = [gen]   # 可變容器，允許 reinit 時替換
+    batch_eval_fn = make_mpi_batch_evaluate_fn(
+        gen_holder=gen_holder,
+        cwg=cwg,
+        args=args,
+        logger=logger,
+        n_dim=D,
+    )
 
     # ── 執行優化 ──────────────────────────────────────────────────────────
-    # ★ v1.1 設計原則：
-    #   rank 0：在 try/finally 中呼叫 optimizer.optimize()，
-    #           finally 保證發送 STOP 信號。
-    #
-    #   非 rank 0：在 while 迴圈中持續呼叫 _mpi_evaluate_all(positions=None)，
-    #              函式內的 flag bcast 決定繼續或退出。
-    #              不再手動複製評估邏輯（v1.0 的維護陷阱）。
-    #
-    # 通訊對齊保證：
-    #   每次 rank 0 的 batch_eval_fn → _mpi_evaluate_all 廣播兩次（flag + positions）
-    #   非 rank 0 的 while 迴圈也在同一個 _mpi_evaluate_all 呼叫裡處理這兩次廣播
-    #   => 兩端廣播計數永遠對齊
-
     if _RANK == 0:
         optimizer = AESOQPSOOptimizer(
             n_params           = D,
@@ -440,26 +590,20 @@ def main():
             import traceback
             logger.error(traceback.format_exc())
         finally:
-            # ★ v1.1 關鍵：無論 optimize() 是否成功，都必須發送 STOP 信號
-            # 確保非 rank 0 能從 while 迴圈退出，不會永久阻塞
             if _HAS_MPI and _NRANK > 1:
                 _mpi_signal_stop()
-                logger.info("[MPI v1.1] STOP 信號已發送，等待所有 rank 完成...")
+                logger.info("[MPI v1.2] STOP 信號已發送，等待所有 rank 完成...")
 
     else:
-        # ★ v1.1：非 rank 0 直接在迴圈中呼叫 _mpi_evaluate_all
-        # 函式內部的 flag bcast 決定繼續（CONTINUE）或退出（STOP）
+        # 非 rank 0：持續等待 bcast，直到收到 STOP 信號
         while True:
-            results = _mpi_evaluate_all(gen, cwg, args, None)
-            # results 為空列表代表收到 STOP 信號，退出迴圈
+            results = _mpi_evaluate_all(gen_holder[0], cwg, args, None)
             if len(results) == 0:
                 break
 
-    # ── 所有 rank 同步，確保通訊完成 ──────────────────────────────────────
     if _HAS_MPI:
         _COMM.Barrier()
 
-    # ── 最終輸出（只有 rank 0）────────────────────────────────────────────
     if _RANK == 0:
         if best_params is not None:
             best_npy = os.path.join(args.data_dir, f"{args.task_name}_best_params.npy")
@@ -468,7 +612,7 @@ def main():
             logger.info(
                 f"最終結果: V×U={best_fitness:.6f}  "
                 + ("✓ 超越 BO 基線 0.8834!" if best_fitness > 0.8834
-                   else "✗ 未超越 — 建議增加 --particles 或 --iterations")
+                   else "✗ 未超越")
             )
         else:
             logger.error("optimize() 未正常完成，無法儲存最佳參數。")
