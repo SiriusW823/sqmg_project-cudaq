@@ -3,7 +3,7 @@
 qpso_optimizer_ae.py
 AE-SOQPSO — Amplitude-Ensemble Single-Objective Quantum PSO
 融合 AE-QTS（arXiv:2311.12867v2）的調和加權與配對更新機制
-支援單粒子（subprocess）與批次（MPI）兩種評估模式
+支援單粒子與批次兩種評估模式
 ==============================================================================
 
 v1.0 → v1.1 修正（對照論文 arXiv:2311.12867v2）：
@@ -41,7 +41,7 @@ v1.0 → v1.1 修正（對照論文 arXiv:2311.12867v2）：
         x_i ← x_i + (rotate_factor/k) · (attractor_i - x_i)
       對應論文：兩個粒子都用相同幅度 Δθ/k 做量子旋轉，方向由 Table I 決定。
 
-  【3】批次評估介面（MPI 並行支援）
+  【3】批次評估介面（parallel evaluator 支援）
       batch_evaluate_fn(positions: np.ndarray[M,D]) → list[(v, u)]
 
   【4】雙目標解耦監控
@@ -391,7 +391,7 @@ class AESOQPSOOptimizer:
         執行 AE-SOQPSO 優化。
 
         自動選擇評估模式：
-          - 有 batch_evaluate_fn → 批次模式（MPI 並行）
+          - 有 batch_evaluate_fn → 批次模式（parallel evaluator）
           - 否則 → 逐粒子模式（subprocess 或單 GPU）
         """
         use_batch   = self.batch_evaluate_fn is not None
@@ -403,7 +403,7 @@ class AESOQPSOOptimizer:
         self.logger.info(f"  參數維度 D              : {self.D}")
         self.logger.info(f"  最大迭代 T              : {self.T}")
         self.logger.info(f"  總評估次數              : {total_evals}")
-        self.logger.info(f"  評估模式               : {'批次（MPI）' if use_batch else '逐粒子（subprocess）'}")
+        self.logger.info(f"  評估模式               : {'批次（parallel evaluator）' if use_batch else '逐粒子'}")
         self.logger.info(f"  α 排程                : [{self.alpha_min}, {self.alpha_max}] cosine")
         self.logger.info(f"  AE 加權 mbest（v1.1）  : {'✓ U形對稱調和加權' if self.ae_weighting else '✗ 關閉（均等均值）'}")
         self.logger.info(f"  AE 配對更新（v1.1）    : {'✓ 兩端→attractor，間隔' + str(self.pair_interval) + '迭代' if self.pair_interval > 0 else '✗ 關閉'}")
@@ -422,22 +422,22 @@ class AESOQPSOOptimizer:
             elapsed_batch = time.time() - t0
             for i, (v, u) in enumerate(batch_results):
                 f = float(v) * float(u)
+                self._update_pbest(i, f)
+                self._update_gbest(i, f, v, u)
                 self._log_eval(self._global_eval_cnt, 0, i, v, u, f,
                                self._get_alpha(0), elapsed_batch)
                 self._global_eval_cnt += 1
-                self._update_pbest(i, f)
-                self._update_gbest(i, f, v, u)
         else:
             for i in range(self.M):
                 t_i = time.time()
                 v, u = self.evaluate_fn(self.positions[i])
                 f    = float(v) * float(u)
                 elapsed = time.time() - t_i
+                self._update_pbest(i, f)
+                self._update_gbest(i, f, v, u)
                 self._log_eval(self._global_eval_cnt, 0, i, v, u, f,
                                self._get_alpha(0), elapsed)
                 self._global_eval_cnt += 1
-                self._update_pbest(i, f)
-                self._update_gbest(i, f, v, u)
 
         self._prev_best = self.gbest_fit
 
@@ -482,11 +482,11 @@ class AESOQPSOOptimizer:
                 for i, (v, u) in enumerate(batch_results):
                     f = float(v) * float(u)
                     iter_fits.append(f)
+                    self._update_pbest(i, f)
+                    self._update_gbest(i, f, v, u)
                     self._log_eval(self._global_eval_cnt, t + 1, i, v, u, f,
                                    alpha, elapsed_batch)
                     self._global_eval_cnt += 1
-                    self._update_pbest(i, f)
-                    self._update_gbest(i, f, v, u)
             else:
                 for i in range(self.M):
                     t_i = time.time()
@@ -494,11 +494,11 @@ class AESOQPSOOptimizer:
                     f    = float(v) * float(u)
                     elapsed = time.time() - t_i
                     iter_fits.append(f)
+                    self._update_pbest(i, f)
+                    self._update_gbest(i, f, v, u)
                     self._log_eval(self._global_eval_cnt, t + 1, i, v, u, f,
                                    alpha, elapsed)
                     self._global_eval_cnt += 1
-                    self._update_pbest(i, f)
-                    self._update_gbest(i, f, v, u)
 
             self._update_stagnation(self.gbest_fit)
             self._maybe_reinit()

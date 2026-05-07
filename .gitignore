@@ -5,12 +5,17 @@ __pycache__/
 dist/
 build/
 .eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # 環境
 .venv/
 *.env
+.env.*
 
 # 實驗輸出（大型資料不進 git）
+results*/
 results_qpso/
 results_chemistry_constraint_bo/
 results_no_chemistry_constraint_bo/
@@ -18,6 +23,8 @@ results_no_chemistry_constraint_bo/
 *.pkl
 *.log
 *.csv
+*.out
+*.err
 
 # 但保留 README 與程式碼
 !README.md
