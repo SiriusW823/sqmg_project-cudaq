@@ -1,57 +1,39 @@
 """
 ==============================================================================
 qpso_optimizer_ae.py
-AE-SOQPSO — Amplitude-Ensemble Single-Objective Quantum PSO
+AE-SOQPSO v1.2 — Amplitude-Ensemble Single-Objective Quantum PSO
 融合 AE-QTS（arXiv:2311.12867v2）的調和加權與配對更新機制
 支援單粒子與批次兩種評估模式
-==============================================================================
 
-v1.0 → v1.1 修正（對照論文 arXiv:2311.12867v2）：
+v1.1 → v1.2 新增功能：
 
-  ★ [BUG-FIX 1] _ae_weighted_mbest() 加權方案錯誤：
-      v1.0：單調遞減加權 w_k = 1/(k+1)（最好粒子影響力最大，依序遞減）
-      論文：AE-QTS Algorithm 3 中，第 k 對 (best_k, worst_k) 的旋轉幅度
-            均為 Δθ/k，代表第 k 名「和」第 M+1-k 名各有影響力 1/k。
-            這是「兩端高、中間低」的 U 形加權，排名中間的粒子影響力最小。
-      v1.1 修正：改為對稱 U 形調和加權。
+  ★ [NEW] Opposition-Based Learning (OBL) Phase 0
+      在 Phase 0 評估完成後，額外評估每個粒子的對立粒子 x' = 1 - x。
+      若對立粒子的 fitness 更好則替換，讓初始探索等效覆蓋翻倍。
+      僅支援 batch_evaluate_fn 模式（parallel evaluator）。
+      由 obl=True 控制，可透過 --no_obl 關閉。
 
-  ★ [BUG-FIX 2] _ae_paired_update() 語意偏差：
-      v1.0：best 粒子向 gbest 靠近，worst 粒子做 Cauchy 重尾擾動。
-      論文：AE-QTS 的 Table I 旋轉查找表對 best 和 worst 粒子做的是
-            對稱的同向調整——兩者都依據 (s_best ⊕ s_worst) 的符號
-            向「高適應度方向」旋轉。Grover Search 的核心是「振幅放大」，
-            讓所有個體的目標態機率都增加，而不是 worst 做隨機探索。
-            Cauchy 擾動是 SOQPSO 自身的 mutation 機制，不屬於 AE 配對。
-      v1.1 修正：best 和 worst 均向各自的 local attractor（pbest + gbest
-            的凸組合）移動，幅度為 rotate_factor/k，符合論文精神。
+  ★ [NEW] V-U 解耦 mbest（V-U Decoupled mbest）
+      在標準 U 形調和加權 mbest 基礎上，額外加入：
+        - _best_v_pos：歷史最高 validity 對應的粒子位置
+        - _best_u_pos：歷史最高 uniqueness 對應的粒子位置
+      加權比例：w_vu=0.70, w_v=0.15, w_u=0.15
+      解決高維空間中 V 最優解與 U 最優解分離的聯合最優問題。
+      由 vu_decouple=True 控制，可透過 --no_vu_decouple 關閉。
 
-核心改進（修正後）：
-
-  【1】AE-QTS 對稱 U 形調和加權 mbest
-      映射論文 Δθ/k 的配對機制到連續 QPSO：
-        排名第 k 名和第 M+1-k 名各貢獻 1/k 的加權影響力
-        => 排名兩端（前幾名和後幾名）影響力大，中間最小
-      物理意義：接近 gbest 的粒子（high rank）提供收斂方向；
-                遠離 gbest 的粒子（low rank）提供多樣性方向；
-                中間粒子（已探索但未收斂）提供最少資訊。
-
-  【2】AE-QTS Best-Worst 配對更新（忠實映射論文 Algorithm 3）
-      對第 k 對 (best_k, worst_k)，兩者均向各自的 attractor 移動：
-        attractor_i = φ·pbest_i + (1-φ)·gbest，φ ~ U(0,1)
-        x_i ← x_i + (rotate_factor/k) · (attractor_i - x_i)
-      對應論文：兩個粒子都用相同幅度 Δθ/k 做量子旋轉，方向由 Table I 決定。
-
-  【3】批次評估介面（parallel evaluator 支援）
-      batch_evaluate_fn(positions: np.ndarray[M,D]) → list[(v, u)]
-
-  【4】雙目標解耦監控
-      分別追蹤 V_best_ever 和 U_best_ever
+  v1.1 修正保留（不變）：
+    - U 形對稱調和加權 mbest（對照 AE-QTS Algorithm 3）
+    - AE-QTS Best-Worst 配對更新（兩端→attractor，步長 rotate_factor/k）
+    - 停滯偵測與重初始化
+    - 批次評估介面（parallel evaluator 支援）
+    - 雙目標解耦監控（V_best_ever, U_best_ever）
 
 參考文獻：
   [1] Tseng et al., AE-QTS, arXiv:2311.12867v2, 2024
   [2] Sun et al., QPSO, CEC 2012
   [3] Chen et al., QMG, JCTC 2025
   [4] Xiao et al., SQMG, arXiv:2604.13877v1, 2026
+  [5] Tizhoosh, H.R., Opposition-Based Learning, ISDA 2005
 ==============================================================================
 """
 from __future__ import annotations
@@ -68,11 +50,18 @@ import numpy as np
 
 class AESOQPSOOptimizer:
     """
-    Amplitude-Ensemble Single-Objective QPSO（v1.1 修正版）。
+    Amplitude-Ensemble Single-Objective QPSO（v1.2 OBL + V-U Decouple 版）。
 
     評估模式（擇一傳入）：
       evaluate_fn:       (pos: np.ndarray[D]) → (validity, uniqueness)
       batch_evaluate_fn: (positions: np.ndarray[M,D]) → list[(v,u)]
+
+    新增參數：
+      obl:          是否在 Phase 0 執行 Opposition-Based Learning（僅 batch 模式）
+      vu_decouple:  是否啟用 V-U 解耦 mbest
+      w_vu:         標準 U 形加權 mbest 的權重（預設 0.70）
+      w_v:          V* 位置的牽引權重（預設 0.15）
+      w_u:          U* 位置的牽引權重（預設 0.15）
     """
 
     def __init__(
@@ -88,15 +77,21 @@ class AESOQPSOOptimizer:
         alpha_min:           float = 0.4,
         data_dir:            str   = "results_ae_qpso",
         task_name:           str   = "unconditional_9_ae_qpso",
-        stagnation_limit:    int   = 8,
-        reinit_fraction:     float = 0.20,
+        stagnation_limit:    int   = 12,
+        reinit_fraction:     float = 0.25,
         mutation_prob:       float = 0.15,
         mutation_scale:      float = 0.15,
         alpha_perturb_std:   float = 0.04,
         alpha_stag_boost:    float = 0.20,
         ae_weighting:        bool  = True,
         pair_interval:       int   = 5,
-        rotate_factor:       float = 0.01,
+        rotate_factor:       float = 0.015,
+        # ★ v1.2 新增
+        obl:                 bool  = True,
+        vu_decouple:         bool  = True,
+        w_vu:                float = 0.70,
+        w_v:                 float = 0.15,
+        w_u:                 float = 0.15,
     ):
         if evaluate_fn is None and batch_evaluate_fn is None:
             raise ValueError("必須提供 evaluate_fn 或 batch_evaluate_fn 其中一個。")
@@ -120,6 +115,12 @@ class AESOQPSOOptimizer:
         self.ae_weighting      = ae_weighting
         self.pair_interval     = pair_interval
         self.rotate_factor     = rotate_factor
+        # ★ v1.2
+        self.obl               = obl
+        self.vu_decouple       = vu_decouple
+        self.w_vu              = w_vu
+        self.w_v               = w_v
+        self.w_u               = w_u
 
         self.lb = np.zeros(self.D, dtype=np.float64)
         self.ub = np.ones(self.D,  dtype=np.float64)
@@ -137,13 +138,18 @@ class AESOQPSOOptimizer:
         self._best_v_ever = 0.0
         self._best_u_ever = 0.0
 
-        self.history:          List[Dict] = []
-        self._stag_counter     = 0
-        self._prev_best        = -np.inf
-        self._global_eval_cnt  = 0
-        self._total_reinits    = 0
-        self._total_mutations  = 0
-        self._total_ae_updates = 0
+        # ★ v1.2：V* 和 U* 位置追蹤
+        self._best_v_pos: Optional[np.ndarray] = None
+        self._best_u_pos: Optional[np.ndarray] = None
+
+        self.history:            List[Dict] = []
+        self._stag_counter       = 0
+        self._prev_best          = -np.inf
+        self._global_eval_cnt    = 0
+        self._total_reinits      = 0
+        self._total_mutations    = 0
+        self._total_ae_updates   = 0
+        self._total_obl_replaced = 0   # ★ v1.2
 
         os.makedirs(data_dir, exist_ok=True)
         self._csv_path = os.path.join(data_dir, f"{task_name}.csv")
@@ -180,7 +186,7 @@ class AESOQPSOOptimizer:
         return self._clip(attractor + sign * step)
 
     def _cauchy_mutation(self, x: np.ndarray) -> np.ndarray:
-        """Cauchy 重尾變異，用於跳脫局部最優（屬於 SOQPSO 自身機制，非 AE 配對）。"""
+        """Cauchy 重尾變異（SOQPSO 自身機制，非 AE 配對）。"""
         x_mut = x.copy()
         n_dim = max(1, int(self.D * self.rng.uniform(0.15, 0.35)))
         dims  = self.rng.choice(self.D, size=n_dim, replace=False)
@@ -189,86 +195,115 @@ class AESOQPSOOptimizer:
         return self._clip(x_mut)
 
     # ================================================================
-    # ★ AE-QTS 核心機制（v1.1 修正版）
+    # ★ v1.2 Opposition-Based Learning
+    # ================================================================
+
+    def _run_obl_phase0(self) -> None:
+        """
+        Phase 0 結束後評估對立粒子 x' = clip(1 - x, 0, 1)。
+        若對立粒子 fitness 更好則替換。
+        僅在 batch_evaluate_fn 模式下執行。
+        """
+        if self.batch_evaluate_fn is None:
+            self.logger.info("[OBL] 跳過（僅支援 batch_evaluate_fn 模式）")
+            return
+
+        self.logger.info(
+            f"[OBL v1.2] Phase 0 對立粒子評估（{self.M} 個對立位置）..."
+        )
+        obl_positions = self._clip(1.0 - self.positions)
+        t_obl = time.time()
+        obl_results = self.batch_evaluate_fn(obl_positions)
+        elapsed_obl = time.time() - t_obl
+
+        n_replaced = 0
+        alpha0 = self._get_alpha(0)
+        for i, (v, u) in enumerate(obl_results):
+            f_obl = float(v) * float(u)
+            # 記錄 OBL 評估（particle_id = M + i 以示區別）
+            self._log_eval(
+                self._global_eval_cnt, 0, self.M + i,
+                v, u, f_obl, alpha0, elapsed_obl
+            )
+            self._global_eval_cnt += 1
+
+            if f_obl > self.pbest_fit[i]:
+                self.positions[i]  = obl_positions[i].copy()
+                self.pbest[i]      = obl_positions[i].copy()
+                self.pbest_fit[i]  = f_obl
+                self._update_gbest(i, f_obl, v, u)
+                n_replaced += 1
+
+        self._total_obl_replaced += n_replaced
+        self.logger.info(
+            f"[OBL v1.2] 完成（{elapsed_obl:.1f}s），"
+            f"替換 {n_replaced}/{self.M} 個粒子，"
+            f"gbest={self.gbest_fit:.4f}"
+        )
+
+    # ================================================================
+    # ★ v1.2 AE-QTS + V-U Decoupled mbest
     # ================================================================
 
     def _ae_weighted_mbest(self) -> np.ndarray:
         """
-        ★ v1.1 修正：AE-QTS 對稱 U 形調和加權 mbest。
+        ★ v1.2：AE-QTS U 形對稱調和加權 mbest + V-U 解耦牽引。
 
-        論文 AE-QTS Algorithm 3 的結構：
-          對第 k 對 (best_k, worst_k)，k = 1..M/2：
-            旋轉幅度 = Δθ/k（best_k 和 worst_k 各用同一幅度）
+        標準部分（v1.1 不變）：
+          第 k 對 (best_k, worst_k) 各貢獻 1/k，形成 U 形加權分佈。
 
-        這意味著：
-          - 排名第 k 名（best_k）的影響力貢獻 = 1/k
-          - 排名第 M+1-k 名（worst_k）的影響力貢獻 = 1/k
-          - 排名在 [M/2+1, M/2] 中間的粒子：沒有配對，影響力最小
-
-        => 加權分佈形狀為 U 形：兩端高（前幾名 + 後幾名），中間低
-           與 v1.0 的單調遞減加權（只有前幾名有高影響力）根本不同。
-
-        物理意義：
-          - 高排名粒子：提供收斂方向（gbest 附近）
-          - 低排名粒子：提供多樣性方向（探索空間的另一端）
-          - 中間粒子：資訊重複，影響力最小
+        V-U 解耦牽引（v1.2，由 vu_decouple 控制）：
+          mbest = (w_vu * mbest_standard
+                 + w_v  * _best_v_pos
+                 + w_u  * _best_u_pos) / total_w
         """
-        sorted_idx = np.argsort(self.pbest_fit)[::-1]  # fitness 由高到低
+        sorted_idx = np.argsort(self.pbest_fit)[::-1]
         half = self.M // 2
         weights = np.zeros(self.M, dtype=np.float64)
 
-        # 第 k 對：best_k（排名 k-1）和 worst_k（排名 M-k）各貢獻 1/k
         for k in range(1, half + 1):
             w_k = 1.0 / k
-            weights[k - 1]        += w_k   # best_k：排名 k（0-indexed: k-1）
-            weights[self.M - k]   += w_k   # worst_k：排名 M+1-k（0-indexed: M-k）
+            weights[k - 1]      += w_k
+            weights[self.M - k] += w_k
 
-        # M 為奇數時，正中間那個粒子沒有配對（影響力 = 0，已是預設值）
         total = weights.sum()
-        if total > 0:
-            weights /= total
-        else:
-            # 防禦性 fallback：均等加權（不應發生）
-            weights[:] = 1.0 / self.M
+        weights = weights / total if total > 0 else np.full(self.M, 1.0 / self.M)
 
-        return np.sum(self.pbest[sorted_idx] * weights[:, np.newaxis], axis=0)
+        mbest_standard = np.sum(
+            self.pbest[sorted_idx] * weights[:, np.newaxis], axis=0
+        )
+
+        if not self.vu_decouple:
+            return mbest_standard
+
+        components = [self.w_vu * mbest_standard]
+        active_w   = self.w_vu
+
+        if self._best_v_pos is not None:
+            components.append(self.w_v * self._best_v_pos)
+            active_w += self.w_v
+        if self._best_u_pos is not None:
+            components.append(self.w_u * self._best_u_pos)
+            active_w += self.w_u
+
+        return sum(components) / active_w
 
     def _ae_paired_update(self, alpha: float):
         """
-        ★ v1.1 修正：AE-QTS Best-Worst 配對更新，忠實映射論文 Algorithm 3。
-
-        論文精神（Grover Search 振幅放大類比）：
-          AE-QTS 的旋轉查找表（Table I）對 best_k 和 worst_k 均按照
-          「向目標態方向調整振幅」的原則操作：
-            sign = best_j ⊕ worst_j 決定旋轉正負方向
-            兩者都朝「增加目標態機率」的方向旋轉，幅度 Δθ/k
-
-          連續空間映射：
-            best_k 的 attractor  = φ·pbest_{best_k} + (1-φ)·gbest
-            worst_k 的 attractor = φ·pbest_{worst_k} + (1-φ)·gbest
-            兩者都向各自的 attractor 移動，步長 rotate_factor/k
-
-          這與 v1.0 的「worst 做 Cauchy 擾動」本質不同：
-            v1.0 的 worst 做擾動 → 偏向隨機探索（PSO mutation 機制）
-            論文的 worst 做旋轉 → 偏向收斂（振幅放大）
-            Cauchy mutation 在 SOQPSO 主迴圈中已有，不應在 AE 配對中重複。
-
-        注意：此函式在每 pair_interval 個 QPSO 迭代執行一次，
-              在主位置更新（_update_pos_single）之後、評估之前呼叫。
+        AE-QTS Best-Worst 配對更新（v1.1 不變）。
+        Best 和 Worst 均向各自的 local attractor 移動，幅度 rotate_factor/k。
         """
         if self.gbest_pos is None:
             return
 
         half     = self.M // 2
-        sorted_i = np.argsort(self.pbest_fit)[::-1]   # fitness 由高到低
+        sorted_i = np.argsort(self.pbest_fit)[::-1]
 
         for k in range(1, half + 1):
             best_idx  = sorted_i[k - 1]
             worst_idx = sorted_i[self.M - k]
-            step = self.rotate_factor / k              # 1/k 衰減，對應論文 Δθ/k
+            step = self.rotate_factor / k
 
-            # 兩者都向各自的 local attractor 移動（Grover 振幅放大類比）
-            # attractor_i = φ·pbest_i + (1-φ)·gbest
             for idx in (best_idx, worst_idx):
                 phi       = self.rng.uniform(0.0, 1.0, size=self.D)
                 attractor = phi * self.pbest[idx] + (1.0 - phi) * self.gbest_pos
@@ -330,10 +365,13 @@ class AESOQPSOOptimizer:
                 f"  🔥 New gbest!  V={val:.4f}  U={uniq:.4f}  V×U={fit:.4f}"
                 f"{'  ✓ 超越 BO 基線 0.8834!' if fit > 0.8834 else ''}"
             )
-        if val  > self._best_v_ever:
+        # ★ v1.2：追蹤 V* 和 U* 的粒子位置
+        if val > self._best_v_ever:
             self._best_v_ever = val
+            self._best_v_pos  = self.positions[i].copy()
         if uniq > self._best_u_ever:
             self._best_u_ever = uniq
+            self._best_u_pos  = self.positions[i].copy()
 
     # ================================================================
     # CSV 記錄
@@ -362,7 +400,7 @@ class AESOQPSOOptimizer:
         self.logger.info(f"validity (maximize): {v:.3f}")
         self.logger.info(f"uniqueness (maximize): {u:.3f}")
         self.logger.info(
-            f"  [AE-QPSO] iter={qpso_iter}  p={particle_id}  "
+            f"  [AE-QPSO v1.2] iter={qpso_iter}  p={particle_id}  "
             f"fit={f:.4f}  gbest={self.gbest_fit:.4f}  "
             f"stag={self._stag_counter}  α={alpha:.4f}  t={elapsed:.1f}s  "
             f"[V⋆={self._best_v_ever:.3f} U⋆={self._best_u_ever:.3f}]"
@@ -388,32 +426,39 @@ class AESOQPSOOptimizer:
 
     def optimize(self) -> Tuple[np.ndarray, float]:
         """
-        執行 AE-SOQPSO 優化。
+        執行 AE-SOQPSO 優化（v1.2）。
 
-        自動選擇評估模式：
-          - 有 batch_evaluate_fn → 批次模式（parallel evaluator）
-          - 否則 → 逐粒子模式（subprocess 或單 GPU）
+        Phase 0：評估 M 個初始粒子；若 obl=True 額外評估 M 個對立粒子。
+        主迭代：位置更新 → AE 配對更新（每 pair_interval）→ 評估 → 停滯偵測。
         """
         use_batch   = self.batch_evaluate_fn is not None
-        total_evals = self.M * (self.T + 1)
+        obl_evals   = self.M if (self.obl and use_batch) else 0
+        total_evals = self.M * (self.T + 1) + obl_evals
 
         self.logger.info("=" * 70)
-        self.logger.info("AE-SOQPSO（v1.1 修正版）優化啟動")
-        self.logger.info(f"  粒子數 M               : {self.M}")
-        self.logger.info(f"  參數維度 D              : {self.D}")
-        self.logger.info(f"  最大迭代 T              : {self.T}")
-        self.logger.info(f"  總評估次數              : {total_evals}")
-        self.logger.info(f"  評估模式               : {'批次（parallel evaluator）' if use_batch else '逐粒子'}")
-        self.logger.info(f"  α 排程                : [{self.alpha_min}, {self.alpha_max}] cosine")
-        self.logger.info(f"  AE 加權 mbest（v1.1）  : {'✓ U形對稱調和加權' if self.ae_weighting else '✗ 關閉（均等均值）'}")
-        self.logger.info(f"  AE 配對更新（v1.1）    : {'✓ 兩端→attractor，間隔' + str(self.pair_interval) + '迭代' if self.pair_interval > 0 else '✗ 關閉'}")
-        self.logger.info(f"  rotate_factor          : {self.rotate_factor}")
-        self.logger.info(f"  停滯門檻               : {self.stagnation_limit} iters")
-        self.logger.info(f"  Cauchy 變異機率（主迴圈）: {self.mutation_prob:.0%}")
-        self.logger.info(f"  BO 基線（Chen 2025）   : 0.8834 (V=0.955, U=0.925)")
+        self.logger.info("AE-SOQPSO（v1.2 OBL + V-U Decouple）優化啟動")
+        self.logger.info(f"  粒子數 M                : {self.M}")
+        self.logger.info(f"  參數維度 D               : {self.D}")
+        self.logger.info(f"  最大迭代 T               : {self.T}")
+        self.logger.info(f"  總評估次數（含 OBL）      : {total_evals}")
+        self.logger.info(f"  評估模式                 : {'批次（parallel evaluator）' if use_batch else '逐粒子'}")
+        self.logger.info(f"  α 排程                  : [{self.alpha_min}, {self.alpha_max}] cosine")
+        self.logger.info(f"  AE 加權 mbest（U形）     : {'✓' if self.ae_weighting else '✗'}")
+        self.logger.info(
+            f"  V-U 解耦 mbest（v1.2）  : "
+            f"{'✓ w_vu={:.2f} w_v={:.2f} w_u={:.2f}'.format(self.w_vu, self.w_v, self.w_u) if self.vu_decouple else '✗'}"
+        )
+        self.logger.info(f"  OBL Phase 0（v1.2）     : {'✓' if (self.obl and use_batch) else '✗'}")
+        self.logger.info(
+            f"  AE 配對更新             : "
+            f"{'✓ 間隔' + str(self.pair_interval) + '迭代  rotate_factor=' + str(self.rotate_factor) if self.pair_interval > 0 else '✗'}"
+        )
+        self.logger.info(f"  停滯門檻                 : {self.stagnation_limit} iters")
+        self.logger.info(f"  Cauchy 變異機率          : {self.mutation_prob:.0%}")
+        self.logger.info(f"  BO 基線（Chen 2025）    : 0.8834 (V=0.955, U=0.925)")
         self.logger.info("=" * 70)
 
-        # ── Phase 0：初始化評估 ───────────────────────────────────────────
+        # ── Phase 0：初始化評估 ────────────────────────────────────────────
         self.logger.info("[Phase 0] 初始粒子評估...")
         t0 = time.time()
 
@@ -439,13 +484,16 @@ class AESOQPSOOptimizer:
                                self._get_alpha(0), elapsed)
                 self._global_eval_cnt += 1
 
+        # ── ★ v1.2 OBL Phase 0 ───────────────────────────────────────────
+        if self.obl and use_batch:
+            self._run_obl_phase0()
+
         self._prev_best = self.gbest_fit
 
         # ── 主迭代 ────────────────────────────────────────────────────────
         for t in range(self.T):
             alpha = self._get_alpha(t)
 
-            # ── ★ v1.1：U 形對稱調和加權 mbest ──────────────────────────
             if self.ae_weighting:
                 mbest = self._ae_weighted_mbest()
             else:
@@ -453,7 +501,6 @@ class AESOQPSOOptimizer:
 
             gbest = self.gbest_pos if self.gbest_pos is not None else self.positions[0]
 
-            # ── 標準 SOQPSO 位置更新 + Cauchy mutation ──────────────────
             for i in range(self.M):
                 self.positions[i] = self._update_pos_single(
                     self.positions[i], self.pbest[i], gbest, mbest, alpha
@@ -462,17 +509,12 @@ class AESOQPSOOptimizer:
                     self.positions[i] = self._cauchy_mutation(self.positions[i])
                     self._total_mutations += 1
 
-            # ── ★ v1.1：AE-QTS 對稱配對更新（每 pair_interval 迭代）────
-            # 在位置更新後、評估前執行，讓 AE 調整的位置直接被評估
             if self.pair_interval > 0 and (t + 1) % self.pair_interval == 0:
                 self._ae_paired_update(alpha)
                 self.logger.info(
-                    f"  [AE 配對更新 v1.1] iter={t+1}  "
-                    f"rotate_factor={self.rotate_factor:.4f}  "
-                    f"累計 {self._total_ae_updates} 次"
+                    f"  [AE 配對更新 v1.1] iter={t+1}  累計 {self._total_ae_updates} 次"
                 )
 
-            # ── 評估 ──────────────────────────────────────────────────────
             iter_fits = []
             t_iter = time.time()
 
@@ -518,7 +560,7 @@ class AESOQPSOOptimizer:
                 'alpha':            alpha,
             })
             self.logger.info(
-                f"  [AE-QPSO Iter {t+1:3d}/{self.T}] "
+                f"  [AE-QPSO v1.2 Iter {t+1:3d}/{self.T}] "
                 f"α={alpha:.3f}  "
                 f"gbest={self.gbest_fit:.4f} (V={self.gbest_val:.3f} U={self.gbest_uniq:.3f})  "
                 f"mean={mean_fit:.4f}  max={max_fit:.4f}  "
@@ -528,28 +570,22 @@ class AESOQPSOOptimizer:
 
         # ── 最終摘要 ──────────────────────────────────────────────────────
         self.logger.info("=" * 70)
-        self.logger.info("AE-SOQPSO 優化完成（v1.1）")
-        self.logger.info(f"  Best V×U        : {self.gbest_fit:.6f}")
-        self.logger.info(f"  Best V          : {self.gbest_val:.4f}")
-        self.logger.info(f"  Best U          : {self.gbest_uniq:.4f}")
+        self.logger.info("AE-SOQPSO 優化完成（v1.2）")
+        self.logger.info(f"  Best V×U          : {self.gbest_fit:.6f}")
+        self.logger.info(f"  Best V            : {self.gbest_val:.4f}")
+        self.logger.info(f"  Best U            : {self.gbest_uniq:.4f}")
+        self.logger.info(f"  V_best_ever       : {self._best_v_ever:.4f}")
+        self.logger.info(f"  U_best_ever       : {self._best_u_ever:.4f}")
         self.logger.info(
-            f"  V_best_ever     : {self._best_v_ever:.4f}  "
-            f"({'正常' if self._best_v_ever > 0.8 else '偏低，建議增加 chemistry constraint'})"
-        )
-        self.logger.info(
-            f"  U_best_ever     : {self._best_u_ever:.4f}  "
-            f"({'正常' if self._best_u_ever > 0.7 else '偏低，建議增加粒子數或迭代數'})"
-        )
-        self.logger.info(
-            f"  BO Baseline     : 0.8834  "
+            f"  BO Baseline       : 0.8834  "
             + ("✓ 超越基線!" if self.gbest_fit > 0.8834
                else f"✗ 差距 {0.8834 - self.gbest_fit:.4f}")
         )
-        self.logger.info(f"  Total evals     : {self._global_eval_cnt}")
-        self.logger.info(f"  Reinits         : {self._total_reinits}")
-        self.logger.info(f"  Mutations       : {self._total_mutations}")
-        self.logger.info(f"  AE pair updates : {self._total_ae_updates}")
-        self.logger.info(f"  AE weighting    : {'v1.1 U形對稱' if self.ae_weighting else '關閉'}")
+        self.logger.info(f"  Total evals       : {self._global_eval_cnt}")
+        self.logger.info(f"  Reinits           : {self._total_reinits}")
+        self.logger.info(f"  Mutations         : {self._total_mutations}")
+        self.logger.info(f"  AE pair updates   : {self._total_ae_updates}")
+        self.logger.info(f"  OBL replacements  : {self._total_obl_replaced}")
         self.logger.info("=" * 70)
 
         best = self.gbest_pos.copy() if self.gbest_pos is not None else np.zeros(self.D)

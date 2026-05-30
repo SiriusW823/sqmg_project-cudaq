@@ -1,61 +1,50 @@
 """
 ==============================================================================
-run_qpso_qmg_cudaq.py  — CUDA-Q 0.7.1 + AE-SOQPSO  (v10.1 parallel-subprocess 版)
+run_qpso_qmg_cudaq.py  — CUDA-Q 0.7.1 + AE-SOQPSO  (v10.2 Sobol+OBL 版)
 ==============================================================================
 
-v9.6 → v10.1  根本性架構升級（根因診斷 2026-04-24）：
+v10.1 → v10.2  四項核心改動：
 
-  ★ 問題一確診：MPI 並行化在 CUDA-Q 0.7.1 + NCHC DGX111 上完全失效
+  ★ [改動一] num_sample 預設值 10000 → 5000
   ─────────────────────────────────────────────────────────────────────
-    症狀：50 粒子 × 122.6s/粒子 = 6129s（全串行），8 GPU 並行應為 858s
-    根本原因（三層複合）：
-      (1) NCHC SLURM 的 GPU 資源綁定方式：--gres=gpu:8 + --ntasks-per-node=8
-          並不會自動將每個 MPI task 綁定到不同物理 GPU。
-          所有 8 個 rank 可能共享同一物理 GPU，Python 層的
-          os.environ["CUDA_VISIBLE_DEVICES"] 在 cgroup 環境下可能被忽略。
-      (2) CUDA-Q 0.7.1 cuStateVec 後端對多行程呼叫存在序列化：
-          即使不同行程使用不同 GPU，libcustatevec 的 stream 初始化
-          可能通過 /dev/nvidia-ctl 產生全節點級別的序列化鎖。
-      (3) MPI rank 生命週期橫跨整個實驗，CUDA context 永不銷毀，
-          cudaMallocHost pinned memory 只進不出。
+    根據 birthday paradox 分析，V3 gbest 所在的電路參數的有效分子種數
+    K ≈ 84,972。在 n=10000 shots 下，E[U] = 0.947；
+    在 n=5000 shots 下，E[U] = 0.973，V×U 理論提升 +0.024。
+    同時與 Chen et al. 2025 的 5000 shots 對齊，消除方法論不對稱。
+    副作用：每次子行程評估時間從 ~284s 縮短至 ~142s，
+            相同時間內可多跑一倍迭代數。
 
-    實測記憶體洩漏：
-      Phase 0：122.6s/粒子 → Iter 1：133.7s（+8.9%，記憶體壓力上升）
-      Iter 2：128.2s → Iter 3：129.9s → OOM Kill（signal 9，rank 1）
-      4 次批次 × 50 粒子 × 2.5GB/粒子 = 500GB pinned，超過系統 RAM 上限
-
-  ★ v10.1 解法：parallel subprocess pool（放棄 MPI，使用多行程子程序池）
+  ★ [改動二] Sobol 序列初始化（消除 seed 問題）
   ─────────────────────────────────────────────────────────────────────
-    核心機制：
-      1. 完全棄用 mpi4py，使用 subprocess.Popen 並行啟動子行程
-      2. 每個子行程由父行程設定 CUDA_VISIBLE_DEVICES=<gpu_id>，
-         繞過 SLURM cgroup 限制，確保每個子行程看到唯一的 GPU
-      3. 子行程在啟動時 CUDA 尚未初始化，CUDA_VISIBLE_DEVICES 有效
-      4. 評估完成後子行程結束 → CUDA context 銷毀 → pinned memory 釋放
-      5. 批次分輪：每輪同時啟動 min(N_GPUS, remaining) 個子行程
+    使用 scrambled Sobol 序列取代 pseudo-random 初始化。
+    Sobol 是低差異序列（low-discrepancy sequence），保證 134D 空間
+    的均勻覆蓋，且完全確定性（seed=0 → 可重現）。
+    由 --sobol_init 旗標控制（預設開啟）。
+    M 建議為 2 的冪次（64 = 2^6 最佳），由 --particles 64 設定。
 
-    效能預估（N=50 粒子，8 GPU，T=40 迭代）：
-      每批次：⌈50/8⌉=7 輪 × 122.6s = 858s ≈ 14 分鐘
-      Phase 0：858s（對比 MPI 版 6129s，提速 7.1×）
-      完整實驗 (T=40)：41 批次 × 858s = 35,178s ≈ 9.8 小時
-      完整實驗 (T=200)：201 批次 × 858s ≈ 47.9 小時（建議改用 T=40）
-
-    記憶體安全：
-      每個子行程只執行 1 次 cudaq.sample()，評估後即結束
-      主行程記憶體穩定（< 1 GB）
-      8 個子行程並行，各佔 ~2.5GB pinned → 8 × 2.5GB = 20GB（可接受）
-
-  ★ 使用 AESOQPSOOptimizer 取代 QMGSOQPSOOptimizer
+  ★ [改動三] AE-SOQPSO v1.2（OBL + V-U 解耦 mbest）
   ─────────────────────────────────────────────────────────────────────
-    AESOQPSOOptimizer（qpso_optimizer_ae.py）：
-      - 支援 batch_evaluate_fn 介面（批次評估，必要）
-      - AE-QTS v1.1 U 形對稱調和加權 mbest（更好的收斂）
-      - 雙目標分解追蹤 V⋆/U⋆
-      - 演算法品質優於 QMGSOQPSOOptimizer
+    引用 qpso_optimizer_ae.py v1.2 的新功能：
+    - OBL Phase 0：對立粒子評估，覆蓋率等效翻倍
+    - V-U 解耦 mbest：加入 V*_pos 和 U*_pos 的牽引，
+      引導粒子向 V×U 聯合最優方向收斂
+    由 --obl / --no_obl 和 --vu_decouple / --no_vu_decouple 控制。
+
+  ★ [改動四] subprocess_timeout 自動調整
+  ─────────────────────────────────────────────────────────────────────
+    num_sample=5000 時每次評估 ~142s，timeout 從 600s 降至 360s，
+    避免真正 hang 的子行程等太久。
+
+  v10.1 保留（不變）：
+    - parallel subprocess pool（8-GPU 並行）
+    - AESOQPSOOptimizer batch_evaluate_fn 介面
+    - worker_eval.py 子行程隔離（CUDA pinned memory 問題根本修正）
+    - verify_workers_parallel 並行驗證
 
 依賴：
-  worker_eval.py 必須與本檔案放在同一目錄
-  qpso_optimizer_ae.py 必須在 PYTHONPATH 可及範圍
+  worker_eval.py    — 必須與本檔案在同一目錄
+  qpso_optimizer_ae.py v1.2 — 必須在 PYTHONPATH 可及範圍
+  scipy             — Sobol 初始化需要（pip install scipy）
 ==============================================================================
 """
 from __future__ import annotations
@@ -124,61 +113,170 @@ def log_memory(logger: logging.Logger, label: str = "") -> float:
 
 
 # ===========================================================================
+# ★ v10.2 Sobol 初始化工具
+# ===========================================================================
+
+def make_sobol_positions(
+    n_particles: int,
+    n_params:    int,
+    logger:      logging.Logger,
+) -> np.ndarray:
+    """
+    使用 scrambled Sobol 序列生成粒子初始位置。
+
+    n_particles 建議為 2 的冪次（64 = 2^6）以保證 Sobol 均勻性保證。
+    若非 2 的冪次，會生成最近的 2^k 個點後截取前 n_particles 個，
+    並發出警告。
+
+    Args:
+        n_particles: 粒子數 M（建議 64）
+        n_params:    參數維度 D（= 134）
+        logger:      logging.Logger
+
+    Returns:
+        positions: np.ndarray shape (n_particles, n_params)，值域 [0,1]
+    """
+    try:
+        from scipy.stats import qmc
+    except ImportError:
+        logger.error("[Sobol] scipy 未安裝，fallback 到 random 初始化。")
+        logger.error("  請執行：pip install scipy --break-system-packages")
+        return None
+
+    import math
+    k = math.ceil(math.log2(n_particles))
+    n_sobol = 2 ** k
+
+    if n_sobol != n_particles:
+        logger.warning(
+            f"[Sobol] n_particles={n_particles} 非 2 的冪次，"
+            f"生成 {n_sobol} 個點後截取前 {n_particles} 個。"
+            f"建議設 --particles 64 以取得完整 Sobol 均勻性保證。"
+        )
+
+    # scramble=True：Owen scrambling，保持低差異性同時打破維度間相關結構
+    # seed=0：完全確定性，不受 --seed 影響
+    sampler = qmc.Sobol(d=n_params, scramble=True, seed=0)
+    sobol_all = sampler.random(n=n_sobol)         # shape (n_sobol, n_params)
+    positions = sobol_all[:n_particles].copy()    # shape (n_particles, n_params)
+
+    # 計算並記錄覆蓋品質
+    disc = qmc.discrepancy(positions)
+    logger.info(
+        f"[Sobol v10.2] 初始化完成  "
+        f"n={n_particles}  d={n_params}  "
+        f"discrepancy={disc:.4e}  "
+        f"(scramble=True, seed=0, 完全確定性)"
+    )
+    # 各維度覆蓋品質
+    per_dim_range = positions.max(axis=0) - positions.min(axis=0)
+    logger.info(
+        f"[Sobol] 各維度覆蓋範圍  "
+        f"mean={per_dim_range.mean():.4f}  "
+        f"min={per_dim_range.min():.4f}  "
+        f"dims_under_0.5={(per_dim_range < 0.5).sum()}"
+    )
+    return positions
+
+
+# ===========================================================================
 # 參數解析
 # ===========================================================================
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="QMG CUDA-Q 0.7.1 + AE-SOQPSO（v10.1 parallel subprocess 版）",
+        description="QMG CUDA-Q 0.7.1 + AE-SOQPSO（v10.2 Sobol+OBL+VU-Decouple 版）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     # ── 基本參數 ──────────────────────────────────────────────────────────
     p.add_argument("--num_heavy_atom",    type=int,   default=9)
-    p.add_argument("--num_sample",        type=int,   default=10000)
-    p.add_argument("--particles",         type=int,   default=50)
-    p.add_argument("--iterations",        type=int,   default=40)
-    p.add_argument("--seed",              type=int,   default=42)
+    p.add_argument(
+        "--num_sample",        type=int,   default=5000,
+        help=(
+            "每次量子電路採樣的 shots 數。"
+            "v10.2 預設從 10000 降至 5000：birthday paradox 分析顯示 K≈84972，"
+            "5000 shots 的理論 uniqueness=0.973（vs 10000 shots 的 0.947），"
+            "V×U 理論提升 +0.024，同時與 Chen 2025 對齊。"
+        ),
+    )
+    p.add_argument(
+        "--particles",         type=int,   default=64,
+        help=(
+            "粒子數 M。v10.2 預設從 56 改為 64（=2^6），"
+            "確保 Sobol 序列的均勻性保證完整成立。"
+        ),
+    )
+    p.add_argument("--iterations",        type=int,   default=120)
+    p.add_argument("--seed",              type=int,   default=0,
+                   help="QPSO 更新的隨機種子（位置更新、Cauchy mutation 用）。"
+                        "Sobol 模式下不影響初始化。")
 
     # ── GPU 並行設定 ──────────────────────────────────────────────────────
-    p.add_argument(
-        "--n_gpus", type=int, default=8,
-        help="並行 GPU 數量。每輪同時啟動此數量的子行程，各佔一張 GPU。"
-             "設為 1 等同於 v9.6 單 GPU 序列模式。",
-    )
-    p.add_argument(
-        "--gpu_ids", type=str, default="0,1,2,3,4,5,6,7",
-        help="可用 GPU 的 device index 列表，逗號分隔。"
-             "子行程依 round-robin 分配。例如：'0,1,2,3,4,5,6,7'",
-    )
+    p.add_argument("--n_gpus",    type=int, default=8)
+    p.add_argument("--gpu_ids",   type=str, default="0,1,2,3,4,5,6,7")
     p.add_argument(
         "--backend", type=str, default="cudaq_nvidia",
         choices=["cudaq_qpp", "cudaq_nvidia", "cudaq_nvidia_fp64",
                  "cudaq_tensornet", "cudaq_tensornet_mps"],
     )
     p.add_argument(
-        "--subprocess_timeout", type=int, default=600,
-        help="每個子行程的最大執行秒數",
+        "--subprocess_timeout", type=int, default=360,
+        help="每個子行程最大秒數。v10.2 預設 360s（5000 shots ~142s，留 2.5x 餘量）",
+    )
+
+    # ── ★ v10.2 Sobol 初始化 ──────────────────────────────────────────────
+    p.add_argument(
+        "--sobol_init",    action="store_true",  default=True,
+        help="使用 scrambled Sobol 序列初始化粒子位置（預設開啟）",
+    )
+    p.add_argument(
+        "--no_sobol_init", action="store_false", dest="sobol_init",
+        help="關閉 Sobol 初始化，改用 pseudo-random（seed 參數生效）",
     )
 
     # ── SOQPSO 超參數 ─────────────────────────────────────────────────────
     p.add_argument("--alpha_max",          type=float, default=1.2)
     p.add_argument("--alpha_min",          type=float, default=0.4)
-    p.add_argument("--mutation_prob",      type=float, default=0.12)
-    p.add_argument("--stagnation_limit",   type=int,   default=8)
-    p.add_argument("--reinit_fraction",    type=float, default=0.20)
+    p.add_argument("--mutation_prob",      type=float, default=0.15)
+    p.add_argument("--stagnation_limit",   type=int,   default=12)
+    p.add_argument("--reinit_fraction",    type=float, default=0.25)
 
     # ── AE-QTS 超參數 ─────────────────────────────────────────────────────
-    p.add_argument("--ae_weighting",       action="store_true",  default=True,
-                   help="AE-QTS v1.1 U 形對稱調和加權 mbest（預設開啟）")
-    p.add_argument("--no_ae_weighting",    action="store_false", dest="ae_weighting")
-    p.add_argument("--pair_interval",      type=int,   default=5,
-                   help="AE-QTS 配對更新執行間隔（QPSO 迭代數）")
-    p.add_argument("--rotate_factor",      type=float, default=0.01,
-                   help="AE-QTS 配對更新步長縮放因子")
+    p.add_argument("--ae_weighting",    action="store_true",  default=True)
+    p.add_argument("--no_ae_weighting", action="store_false", dest="ae_weighting")
+    p.add_argument("--pair_interval",   type=int,   default=5)
+    p.add_argument("--rotate_factor",   type=float, default=0.015)
+
+    # ── ★ v10.2 OBL ──────────────────────────────────────────────────────
+    p.add_argument(
+        "--obl",    action="store_true",  default=True,
+        help="Phase 0 執行 Opposition-Based Learning（預設開啟）",
+    )
+    p.add_argument(
+        "--no_obl", action="store_false", dest="obl",
+        help="關閉 OBL",
+    )
+
+    # ── ★ v10.2 V-U 解耦 mbest ───────────────────────────────────────────
+    p.add_argument(
+        "--vu_decouple",    action="store_true",  default=True,
+        help="啟用 V-U 解耦 mbest（預設開啟）",
+    )
+    p.add_argument(
+        "--no_vu_decouple", action="store_false", dest="vu_decouple",
+        help="關閉 V-U 解耦 mbest",
+    )
+    p.add_argument("--w_vu", type=float, default=0.70,
+                   help="V-U 解耦 mbest 中標準 U 形加權的權重")
+    p.add_argument("--w_v",  type=float, default=0.15,
+                   help="V-U 解耦 mbest 中 V* 位置的牽引權重")
+    p.add_argument("--w_u",  type=float, default=0.15,
+                   help="V-U 解耦 mbest 中 U* 位置的牽引權重")
 
     # ── 輸出設定 ──────────────────────────────────────────────────────────
-    p.add_argument("--task_name", type=str, default="unconditional_9_qpso")
-    p.add_argument("--data_dir",  type=str, default="results_parallel_gpu")
+    p.add_argument("--task_name", type=str,
+                   default="unconditional_9_ae_v6_sobol_obl")
+    p.add_argument("--data_dir",  type=str, default="results_v6")
     return p.parse_args()
 
 
@@ -187,7 +285,7 @@ def parse_args() -> argparse.Namespace:
 # ===========================================================================
 
 def setup_logger(log_path: str) -> logging.Logger:
-    logger = logging.getLogger("ParallelGPUQPSOLogger")
+    logger = logging.getLogger("SobolOBLQPSOLogger")
     logger.setLevel(logging.INFO)
     if logger.handlers:
         logger.handlers.clear()
@@ -232,7 +330,7 @@ def log_gpu_info(logger: logging.Logger, gpu_ids: list) -> None:
 
 
 # ===========================================================================
-# ★ v10.1 核心：parallel subprocess batch evaluate function
+# ★ v10.1 保留：parallel subprocess batch evaluate function
 # ===========================================================================
 
 def make_parallel_batch_evaluate_fn(
@@ -240,28 +338,16 @@ def make_parallel_batch_evaluate_fn(
     cwg:           ConditionalWeightsGenerator,
     logger:        logging.Logger,
     worker_script: str,
-    gpu_ids:       list,            # 每個元素是 GPU device index (str)
+    gpu_ids:       list,
 ) -> callable:
     """
-    建立 parallel subprocess 批次評估函式。
+    parallel subprocess 批次評估函式（v10.1 不變）。
 
-    執行流程（以 M=50, N_GPUS=8 為例）：
-      Round 1: 同時啟動 8 個子行程評估粒子 0..7
-               各子行程 CUDA_VISIBLE_DEVICES = 0, 1, ..., 7
-               等待所有 8 個子行程完成（~122.6s）
-               子行程結束 → CUDA context 銷毀 → pinned memory 釋放
-      Round 2: 粒子 8..15，同上
-      ...
-      Round 7: 粒子 48..49（只有 2 個子行程）
-      Total:   7 rounds × 122.6s = 858s ≈ 14 分鐘
-
-    相比 MPI 方案：
-      MPI（失效）：50 × 122.6s = 6130s（所有 8 ranks 在同一物理 GPU 上序列化）
-      本方案：7 × 122.6s = 858s（8 GPU 真正並行，7.1× 加速）
-
-    記憶體安全性：
-      每個子行程只執行 1 次 cudaq.sample()，結束即釋放 ~2.5GB pinned memory
-      同時最多 8 個子行程並行 → 最多 8 × 2.5GB = 20GB pinned（V100 16GB × 8 可容納）
+    每輪同時啟動 min(n_gpus, remaining) 個子行程，
+    每個子行程：
+      1. 父行程預設 CUDA_VISIBLE_DEVICES=<gpu_id>（在 CUDA 初始化前）
+      2. 執行 worker_eval.py → cudaq.sample() → 輸出 V, U
+      3. 子行程結束 → CUDA context 銷毀 → pinned memory 完全釋放
     """
     n_gpus     = len(gpu_ids)
     pythonpath = os.environ.get("PYTHONPATH", ".")
@@ -280,22 +366,18 @@ def make_parallel_batch_evaluate_fn(
             round_size  = len(round_pids)
 
             t_round = time.time()
-            procs: list      = []   # (proc, result_path, particle_idx, gpu_id_str)
+            procs:        list = []
             weight_paths: list = []
 
-            # ── 同時啟動 round_size 個子行程 ──────────────────────────────
             for local_i, particle_idx in enumerate(round_pids):
                 gpu_id_str = str(gpu_ids[local_i % n_gpus])
                 uid        = uuid.uuid4().hex[:8]
                 wpath      = os.path.join(tempfile.gettempdir(), f"qmg_pw_{uid}.npy")
                 rpath      = os.path.join(tempfile.gettempdir(), f"qmg_pr_{uid}.npy")
 
-                # chemistry constraint 在主行程套用（與 v9.6 一致）
                 w_c = cwg.apply_chemistry_constraint(positions[particle_idx].copy())
                 np.save(wpath, w_c)
 
-                # ★ 關鍵：由父行程設定 CUDA_VISIBLE_DEVICES，
-                #   確保子行程在 CUDA 初始化前已看到正確的 GPU
                 env = os.environ.copy()
                 env["CUDA_VISIBLE_DEVICES"] = gpu_id_str
                 env["PYTHONPATH"]           = pythonpath
@@ -310,7 +392,6 @@ def make_parallel_batch_evaluate_fn(
                     "--backend",        args.backend,
                 ]
 
-                # 非阻塞啟動（Popen 立即返回，子行程在背景執行）
                 proc = subprocess.Popen(
                     cmd,
                     env    = env,
@@ -321,7 +402,6 @@ def make_parallel_batch_evaluate_fn(
                 weight_paths.append(wpath)
                 eval_count[0] += 1
 
-            # ── 等待本輪所有子行程完成 ─────────────────────────────────────
             for proc, rpath, particle_idx, gpu_id_str in procs:
                 try:
                     _, stderr_bytes = proc.communicate(
@@ -341,7 +421,7 @@ def make_parallel_batch_evaluate_fn(
                     proc.wait()
                     logger.warning(
                         f"[parallel] GPU {gpu_id_str} 粒子 {particle_idx} "
-                        f"逾時（>{args.subprocess_timeout}s），回傳 V=0 U=0"
+                        f"逾時（>{args.subprocess_timeout}s）"
                     )
                 except Exception as e:
                     logger.warning(
@@ -354,14 +434,12 @@ def make_parallel_batch_evaluate_fn(
                     except FileNotFoundError:
                         pass
 
-            # ── 清理 weight 暫存檔 ─────────────────────────────────────────
             for wp in weight_paths:
                 try:
                     os.remove(wp)
                 except FileNotFoundError:
                     pass
 
-            # ── 本輪統計 ───────────────────────────────────────────────────
             round_elapsed  = time.time() - t_round
             valid_in_round = sum(1 for idx in round_pids if results[idx][0] > 0)
             logger.info(
@@ -379,7 +457,7 @@ def make_parallel_batch_evaluate_fn(
 
 
 # ===========================================================================
-# 單 GPU 序列模式（n_gpus=1，向後相容 v9.6）
+# 單 GPU 序列模式（v10.1 保留）
 # ===========================================================================
 
 def make_subprocess_evaluate_fn(
@@ -389,10 +467,6 @@ def make_subprocess_evaluate_fn(
     worker_script: str,
     gpu_id:        str,
 ) -> callable:
-    """
-    單粒子、單 GPU 的序列評估（v9.6 模式，n_gpus=1 時使用）。
-    保留供單 GPU 測試或向後相容使用。
-    """
     pythonpath = os.environ.get("PYTHONPATH", ".")
     eval_count = [0]
 
@@ -436,9 +510,9 @@ def make_subprocess_evaluate_fn(
             logger.warning(f"[single] eval #{idx} 例外：{e}")
             return 0.0, 0.0
         finally:
-            for p in [wpath, rpath]:
+            for path in [wpath, rpath]:
                 try:
-                    os.remove(p)
+                    os.remove(path)
                 except FileNotFoundError:
                     pass
 
@@ -446,7 +520,7 @@ def make_subprocess_evaluate_fn(
 
 
 # ===========================================================================
-# worker 功能驗證（並行啟動 n_gpus 個測試子行程）
+# 並行 worker 功能驗證（v10.1 保留）
 # ===========================================================================
 
 def verify_workers_parallel(
@@ -456,12 +530,8 @@ def verify_workers_parallel(
     worker_script: str,
     gpu_ids:       list,
 ) -> bool:
-    """
-    同時啟動 n_gpus 個 worker 子行程（各 5 shots），驗證並行功能。
-    返回 True 表示所有 GPU 均正常。
-    """
     logger.info(
-        f"[v10.1] 並行功能驗證：同時啟動 {len(gpu_ids)} 個子行程（各 5 shots）..."
+        f"[v10.2] 並行功能驗證：同時啟動 {len(gpu_ids)} 個子行程（各 5 shots）..."
     )
     pythonpath = os.environ.get("PYTHONPATH", ".")
     w_test = cwg.generate_conditional_random_weights(random_seed=99)
@@ -493,17 +563,13 @@ def verify_workers_parallel(
         procs.append((proc, rpath, gpu_id_str))
         paths.append(wpath)
 
-    all_ok  = True
-    results = {}
+    all_ok = True
     for proc, rpath, gpu_id_str in procs:
         try:
             _, stderr_bytes = proc.communicate(timeout=180)
             if proc.returncode == 0:
                 arr = np.load(rpath)
-                results[gpu_id_str] = (float(arr[0]), float(arr[1]))
-                logger.info(
-                    f"  GPU {gpu_id_str}: V={arr[0]:.3f}  U={arr[1]:.3f}  ✓"
-                )
+                logger.info(f"  GPU {gpu_id_str}: V={arr[0]:.3f}  U={arr[1]:.3f}  ✓")
             else:
                 msg = stderr_bytes.decode("utf-8", errors="replace")[-300:]
                 logger.error(f"  GPU {gpu_id_str}: 子行程失敗 ✗\n  {msg}")
@@ -529,25 +595,9 @@ def verify_workers_parallel(
 
     elapsed = time.time() - t0
     logger.info(
-        f"[v10.1] 並行驗證完成（{elapsed:.1f}s）  "
-        f"{'✓ 所有 GPU 正常' if all_ok else '✗ 有 GPU 失敗，請確認環境'}"
+        f"[v10.2] 並行驗證完成（{elapsed:.1f}s）  "
+        f"{'✓ 所有 GPU 正常' if all_ok else '✗ 有 GPU 失敗'}"
     )
-
-    # ── 診斷：若時間與串行（n_gpus × 單次時間）接近，代表沒有真正並行 ──
-    expected_parallel = elapsed
-    if len(gpu_ids) > 1 and all_ok:
-        # 5 shots 理應非常快（< 5s），但實際時間可能更長（PTX 編譯、初始化）
-        # 此處只記錄，讓用戶自行判斷
-        logger.info(
-            f"  並行驗證耗時 {elapsed:.1f}s（{len(gpu_ids)} GPU 同時運行）"
-        )
-        if elapsed > 60 * len(gpu_ids):
-            logger.warning(
-                f"  ⚠ 耗時異常（{elapsed:.1f}s > {60*len(gpu_ids)}s），"
-                f"可能存在 GPU 序列化問題（如所有子行程使用同一 GPU）。"
-                f"建議確認 CUDA_VISIBLE_DEVICES 是否在子行程中生效。"
-            )
-
     return all_ok
 
 
@@ -558,19 +608,10 @@ def verify_workers_parallel(
 def main() -> None:
     args = parse_args()
 
-    # ── 解析 GPU ID 列表 ──────────────────────────────────────────────────
     gpu_ids = [g.strip() for g in args.gpu_ids.split(",") if g.strip()]
-    if len(gpu_ids) < args.n_gpus:
-        print(
-            f"[WARNING] --gpu_ids 包含 {len(gpu_ids)} 個 GPU，"
-            f"但 --n_gpus={args.n_gpus}。"
-            f"使用 round-robin 分配，部分 GPU 會處理多個粒子。"
-        )
-    # 統一 n_gpus 為實際可用 GPU 數量（最多）
     effective_n_gpus = min(args.n_gpus, len(gpu_ids))
     gpu_ids = gpu_ids[:effective_n_gpus]
 
-    # ── 設定輸出目錄與 Logger ─────────────────────────────────────────────
     os.makedirs(args.data_dir, exist_ok=True)
     log_path = os.path.join(args.data_dir, f"{args.task_name}.log")
     logger   = setup_logger(log_path)
@@ -581,19 +622,27 @@ def main() -> None:
     logger.info(f"Condition: ['None', 'None']")
     logger.info(f"objective: ['maximize', 'maximize']")
     logger.info(f"# of heavy atoms: {args.num_heavy_atom}")
-    logger.info(f"# of samples: {args.num_sample}")
+    logger.info(f"# of samples: {args.num_sample}  "
+                f"(v10.2 預設 5000，與 Chen 2025 對齊，birthday paradox 修正)")
     logger.info(f"smarts: None")
     logger.info(f"disable_connectivity_position: []")
     logger.info(f"CUDA-Q backend: {args.backend}")
     logger.info(
-        f"[v10.1] 評估模式: parallel subprocess pool  "
+        f"[v10.2] 初始化策略: "
+        f"{'Sobol scrambled (seed=0, 確定性)' if args.sobol_init else f'pseudo-random (seed={args.seed})'}"
+    )
+    logger.info(
+        f"[v10.2] OBL Phase 0: {'✓ 開啟' if args.obl else '✗ 關閉'}"
+    )
+    logger.info(
+        f"[v10.2] V-U 解耦 mbest: "
+        f"{'✓ 開啟 (w_vu={:.2f}, w_v={:.2f}, w_u={:.2f})'.format(args.w_vu, args.w_v, args.w_u) if args.vu_decouple else '✗ 關閉'}"
+    )
+    logger.info(
+        f"[v10.1→v10.2] 評估模式: parallel subprocess pool  "
         f"N_GPUS={effective_n_gpus}  GPU_IDs={gpu_ids}"
     )
-    logger.info(f"[v10.1] subprocess_timeout: {args.subprocess_timeout}s")
-    logger.info(
-        f"[v10.1] 根因修正: MPI 序列化（CUDA-Q 0.7.1 全節點 CUDA context 鎖）"
-        f"→ 子行程隔離（每評估獨立 CUDA context + 記憶體完全釋放）"
-    )
+    logger.info(f"[v10.2] subprocess_timeout: {args.subprocess_timeout}s")
     log_gpu_info(logger, gpu_ids)
     log_memory(logger, "啟動時")
 
@@ -616,45 +665,45 @@ def main() -> None:
     )
     n_flexible = int((cwg.parameters_indicator == 0.0).sum())
     logger.info(f"Number of flexible parameters: {n_flexible}")
-    assert n_flexible == cwg.length_all_weight_vector, (
-        f"[BUG] n_flexible={n_flexible} != {cwg.length_all_weight_vector}"
-    )
+    assert n_flexible == cwg.length_all_weight_vector
 
-    total_evals = args.particles * (args.iterations + 1)
-    batches_per_iter = (args.particles + effective_n_gpus - 1) // effective_n_gpus
-    est_time_per_batch = 122.6  # seconds，基於 V100 實測
-    est_total_h = total_evals / args.particles * batches_per_iter * est_time_per_batch / 3600
+    # ── 預估時間 ──────────────────────────────────────────────────────────
+    # num_sample=5000 時每次評估約 142s（V3 的 284s 一半）
+    sec_per_eval    = 142
+    rounds_per_iter = (args.particles + effective_n_gpus - 1) // effective_n_gpus
+    # OBL 多一個批次
+    obl_batches     = 1 if args.obl else 0
+    total_batches   = (args.iterations + 1) + obl_batches
+    est_h           = total_batches * rounds_per_iter * sec_per_eval / 3600
+    total_evals     = args.particles * (args.iterations + 1) + (args.particles if args.obl else 0)
     logger.info(
-        f"[parallel config] M={args.particles}  T={args.iterations}  "
-        f"total_evals={total_evals}  "
-        f"每批次 {batches_per_iter} 輪 × {effective_n_gpus} GPU 並行  "
-        f"預估總時間：{est_total_h:.1f}h"
+        f"[v10.2 config] M={args.particles}  T={args.iterations}  "
+        f"total_evals≈{total_evals}  "
+        f"每批次 {rounds_per_iter} 輪 × {effective_n_gpus} GPU  "
+        f"預估：{est_h:.1f}h  "
+        f"(num_sample={args.num_sample}，~{sec_per_eval}s/eval)"
     )
 
     # ── 並行 worker 功能驗證 ──────────────────────────────────────────────
     if not verify_workers_parallel(args, cwg, logger, worker_script, gpu_ids):
         logger.error(
-            "[ERROR] 並行驗證失敗。請檢查：\n"
-            "  1. worker_eval.py 是否正確\n"
-            "  2. CUDA-Q 是否正確安裝\n"
-            "  3. GPU 是否可用（nvidia-smi）\n"
-            "  建議先用 --n_gpus 1 --gpu_ids 0 確認單 GPU 正常"
+            "[ERROR] 並行驗證失敗。請先確認單 GPU 正常：\n"
+            "  python run_qpso_qmg_cudaq.py --n_gpus 1 --gpu_ids 0 "
+            "--particles 8 --iterations 1 --num_sample 100"
         )
         sys.exit(1)
     log_memory(logger, "並行驗證後")
 
     # ── 建立評估函式 ──────────────────────────────────────────────────────
     if effective_n_gpus == 1:
-        # 單 GPU：使用向後相容的 evaluate_fn（傳給 AESOQPSOOptimizer 的 evaluate_fn）
-        evaluate_fn = make_subprocess_evaluate_fn(
+        evaluate_fn       = make_subprocess_evaluate_fn(
             args=args, cwg=cwg, logger=logger,
             worker_script=worker_script,
             gpu_id=str(gpu_ids[0]),
         )
         batch_evaluate_fn = None
-        logger.info(f"[v10.1] 使用 單GPU 序列模式（GPU {gpu_ids[0]}）")
+        logger.info(f"[v10.2] 使用 單GPU 序列模式（GPU {gpu_ids[0]}）")
     else:
-        # 多 GPU：使用 parallel batch evaluate
         evaluate_fn       = None
         batch_evaluate_fn = make_parallel_batch_evaluate_fn(
             args=args, cwg=cwg, logger=logger,
@@ -662,18 +711,17 @@ def main() -> None:
             gpu_ids=gpu_ids,
         )
         logger.info(
-            f"[v10.1] 使用 {effective_n_gpus}-GPU 並行模式  "
-            f"GPU IDs: {gpu_ids}"
+            f"[v10.2] 使用 {effective_n_gpus}-GPU 並行模式  GPU IDs: {gpu_ids}"
         )
 
-    # ── 建立 AESOQPSOOptimizer ────────────────────────────────────────────
+    # ── 建立 AESOQPSOOptimizer v1.2 ───────────────────────────────────────
     optimizer = AESOQPSOOptimizer(
         n_params           = n_flexible,
         n_particles        = args.particles,
         max_iterations     = args.iterations,
         logger             = logger,
-        evaluate_fn        = evaluate_fn,        # None 當 n_gpus > 1
-        batch_evaluate_fn  = batch_evaluate_fn,  # None 當 n_gpus == 1
+        evaluate_fn        = evaluate_fn,
+        batch_evaluate_fn  = batch_evaluate_fn,
         seed               = args.seed,
         alpha_max          = args.alpha_max,
         alpha_min          = args.alpha_min,
@@ -685,7 +733,35 @@ def main() -> None:
         ae_weighting       = args.ae_weighting,
         pair_interval      = args.pair_interval,
         rotate_factor      = args.rotate_factor,
+        # ★ v1.2 新增參數
+        obl                = args.obl,
+        vu_decouple        = args.vu_decouple,
+        w_vu               = args.w_vu,
+        w_v                = args.w_v,
+        w_u                = args.w_u,
     )
+
+    # ── ★ v10.2：Sobol 初始化覆寫粒子位置 ────────────────────────────────
+    if args.sobol_init:
+        sobol_pos = make_sobol_positions(args.particles, n_flexible, logger)
+        if sobol_pos is not None:
+            optimizer.positions = sobol_pos.copy()
+            optimizer.pbest     = sobol_pos.copy()
+            # pbest_fit 保持 -inf → Phase 0 評估後正常建立
+            logger.info(
+                f"[Sobol v10.2] 粒子初始位置已覆寫  "
+                f"shape={optimizer.positions.shape}  "
+                f"range=[{optimizer.positions.min():.4f}, "
+                f"{optimizer.positions.max():.4f}]"
+            )
+        else:
+            logger.warning(
+                "[Sobol] scipy 安裝失敗，使用 pseudo-random 初始化（seed={}）".format(args.seed)
+            )
+    else:
+        logger.info(
+            f"[v10.2] 使用 pseudo-random 初始化  seed={args.seed}"
+        )
 
     # ── 執行優化 ──────────────────────────────────────────────────────────
     log_memory(logger, "優化開始前")
@@ -706,8 +782,7 @@ def main() -> None:
     logger.info(
         f"最終結果: V×U={best_fitness:.6f}  "
         + ("✓ 超越 BO 基線 0.8834!" if best_fitness > 0.8834
-           else f"✗ 未超越 — 差距 {0.8834 - best_fitness:.4f}，"
-                f"建議增加 --iterations 或 --particles")
+           else f"✗ 未超越 — 差距 {0.8834 - best_fitness:.4f}")
     )
     log_memory(logger, "程序結束前")
 
