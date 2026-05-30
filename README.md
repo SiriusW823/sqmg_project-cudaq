@@ -13,7 +13,7 @@ Surpass the Bayesian Optimization (BO) baseline reported in Chen et al. 2025
 
 ```
 Target metric : V × U (validity × uniqueness) > 0.8834
-Paper baseline: V = 0.955, U = 0.925, V × U = 0.8834  (~355 BO evaluations)
+Paper baseline: V = 0.955, U = 0.925, V × U = 0.8834  (num_sample = 5 000, ~355 BO evaluations)
 ```
 
 The BO optimizer is replaced with a custom **AE-SOQPSO** (Adaptive Ensemble
@@ -21,9 +21,35 @@ Stochastic Optimal Quantum PSO), integrating three papers:
 
 | Paper | Role |
 |---|---|
-| Chen et al. 2025 (JCTC) | 20-qubit dynamic circuit, QMG framework |
-| Xiao et al. 2026 (arXiv:2604.13877v1) | SQMG, tensornet speed analysis |
-| Tseng et al. 2024 (arXiv:2311.12867v2) | AE-QTS, U-shaped harmonic weighting |
+| Chen et al. 2025 (JCTC) | 20-qubit dynamic circuit, QMG framework, 134 params |
+| Xiao et al. 2026 (arXiv:2604.13877v1) | SQMG — TensorNet scalability reference |
+| Tseng et al. 2024 (arXiv:2311.12867v2) | AE-QTS — U-shaped harmonic weighting & paired update |
+
+---
+
+## Experiment History
+
+| Run | M | T | num_sample | Init | OBL | VU-dec | gbest V×U | Notes |
+|---|---|---|---|---|---|---|---|---|
+| V3 | 56 | 120 | 10 000 | random seed=42 | ✗ | ✗ | **0.8849** | Best so far; V★=1.000, U★=0.986 |
+| V4 | 56 | 200 | 10 000 | random seed=42 | ✗ | ✗ | 0.8720 | α_max=0.8 too restrictive |
+| V5 | 56 | 160 | 10 000 | random seed=17 | ✗ | ✗ | 0.8589 | Bad seed; stagnation never triggered |
+| **V6** | **64** | **120** | **5 000** | **Sobol** | **✓** | **✓** | TBD | Current run |
+
+Key lessons learned:
+
+- `num_sample = 10 000` vs the paper's `5 000` introduces a systematic
+  uniqueness bias. Birthday-paradox analysis gives K ≈ 84 972 distinct
+  valid molecules; switching to `5 000` raises theoretical U from 0.947 to
+  0.973, lifting V×U by ≈ +0.024.
+- Pseudo-random initialization is highly seed-dependent in 134D space.
+  Sobol scrambled sequences provide deterministic, low-discrepancy coverage
+  and eliminate lucky-seed variance entirely.
+- `alpha_max` must stay at 1.2 for adequate exploration; reducing it to 0.8
+  caused premature convergence (V4).
+- `stagnation_limit = 12` with `mutation_prob = 0.15` is the right balance;
+  Cauchy mutation must not suppress reinitialization by constantly producing
+  micro-improvements inside the same basin.
 
 ### Early Experiment Signal (2026-04-24, aborted at iteration 2)
 
@@ -39,37 +65,6 @@ V★ = 0.996 × U★ = 0.909 ≈ **0.905 — above the baseline** was reached in
 individual particles by iteration 2. The infrastructure failure (MPI
 serialization + OOM) was the only blocker. Both issues are resolved in
 v10.1 / v1.3.
-
----
-
-## Repository File Map
-
-```
-sqmg_project-cudaq/
-│
-├── run_qpso_qmg_cudaq.py       ← PRIMARY entry point  (v10.1, parallel subprocess)
-├── run_qpso_qmg_mpi.py         ← MPI fallback          (v1.3, deadlock fix)
-├── worker_eval.py              ← Subprocess worker     (v10.2, tensornet blocked)
-├── qpso_optimizer_ae.py        ← AE-SOQPSO optimizer   (v1.1, U-shape weighting fix)
-├── qpso_optimizer_qmg.py       ← Legacy SOQPSO         (reference only)
-├── cutn-qmg_mpi_8g.slurm      ← SLURM script          (v1.2, --gpu-bind fix)
-│
-├── qmg/
-│   ├── __init__.py
-│   ├── generator_cudaq.py      ← MoleculeGeneratorCUDAQ  (v10.0)
-│   └── utils/
-│       ├── __init__.py
-│       ├── build_dynamic_circuit_cudaq.py ← _qmg_n9 kernel  (v9.1, semicolon fix)
-│       ├── weight_generator.py            ← ConditionalWeightsGenerator
-│       ├── chemistry_data_processing.py   ← MoleculeQuantumStateGenerator
-│       └── fitness_calculator.py          ← V/U scoring
-│
-├── docs/
-│   └── qmg-soqpso-handoff-2026-05-07.md  ← Full runbook
-│
-├── requirements.txt
-└── .gitignore
-```
 
 ---
 
@@ -96,12 +91,54 @@ Hard constraints — **do not change**:
 | `cuda-quantum-cu12` | **== 0.7.1** | Only version with sm_70 SASS; newer wheels silently fall back to CPU |
 | `numpy` | `>= 1.24, < 2.0` | CUDA-Q 0.7.x incompatible with NumPy 2.x |
 | `rdkit` | `>= 2023.9.5` | Required for SMILES validation |
+| `scipy` | any recent | Required for Sobol initialization (v10.2+) |
 
 Install:
 
 ```bash
 pip install cuda-quantum-cu12==0.7.1
 pip install "numpy>=1.24,<2.0" rdkit pandas matplotlib scikit-learn
+pip install scipy --break-system-packages   # if missing
+```
+
+Verify environment:
+
+```bash
+python --version          # 3.10.x
+python -c "import cudaq; print(cudaq.__version__)"   # 0.7.1.x
+python -c "import numpy;  print(numpy.__version__)"  # < 2.0
+python -c "from scipy.stats import qmc; print('scipy OK')"
+```
+
+---
+
+## Repository Layout
+
+```
+sqmg_project-cudaq/
+│
+├── run_qpso_qmg_cudaq.py      ← PRIMARY entry point  (v10.2, Sobol+OBL)
+├── qpso_optimizer_ae.py       ← AE-SOQPSO optimizer   (v1.2, OBL+VU-decouple)
+├── worker_eval.py             ← Subprocess worker     (v10.2, tensornet blocked)
+├── qpso_optimizer_qmg.py      ← Legacy SOQPSO         (reference only)
+├── run_qpso_qmg_mpi.py        ← MPI fallback          (v1.3, deadlock fix)
+├── cutn-qmg_mpi_8g.slurm      ← SLURM script          (v1.2, --gpu-bind fix)
+│
+├── qmg/
+│   ├── __init__.py
+│   ├── generator_cudaq.py     ← MoleculeGeneratorCUDAQ  (v10.0)
+│   └── utils/
+│       ├── __init__.py
+│       ├── build_dynamic_circuit_cudaq.py  ← _qmg_n9 kernel  (v9.1, semicolon fix)
+│       ├── chemistry_data_processing.py    ← MoleculeQuantumStateGenerator
+│       ├── fitness_calculator.py           ← V/U scoring
+│       └── weight_generator.py             ← ConditionalWeightsGenerator
+│
+├── docs/
+│   └── qmg-soqpso-handoff-2026-05-07.md  ← Full runbook
+│
+├── requirements.txt
+└── .gitignore
 ```
 
 ---
@@ -115,9 +152,11 @@ run_qpso_qmg_cudaq.py  (main process, stable RSS < 1 GB)
 │
 ├─ ConditionalWeightsGenerator          # generates / constrains 134 float weights
 │
-└─ AESOQPSOOptimizer (qpso_optimizer_ae.py v1.1)
-    │  M=50 particles, T=40 iterations, D=134 dimensions
-    │  AE-QTS U-shaped harmonic mbest + paired attractor update
+└─ AESOQPSOOptimizer (qpso_optimizer_ae.py v1.2)
+    │  M=64 particles, T=120 iterations, D=134 dimensions
+    │  AE-QTS U-shaped harmonic mbest + V-U decoupled mbest
+    │  OBL Phase 0 (doubles effective initial coverage)
+    │  paired attractor update every pair_interval iterations
     │
     └─ batch_evaluate_fn  (parallel subprocess pool)
         │  Each QPSO iteration launches ⌈M/N_GPUS⌉ rounds.
@@ -130,7 +169,7 @@ run_qpso_qmg_cudaq.py  (main process, stable RSS < 1 GB)
                 └─ MoleculeGeneratorCUDAQ (generator_cudaq.py v10.0)
                     │  chemistry_constraint=False (already applied by parent)
                     │
-                    ├─ cudaq.sample(_qmg_n9, w_list, shots_count=10000)
+                    ├─ cudaq.sample(_qmg_n9, w_list, shots_count=5000)
                     │   20-qubit dynamic circuit
                     │   90 named mid-circuit measurements
                     │   134 float weights
@@ -145,47 +184,92 @@ run_qpso_qmg_cudaq.py  (main process, stable RSS < 1 GB)
 
 Two compounding failures were diagnosed in the 2026-04-24 MPI experiment:
 
-**Failure 1 — MPI serialization.**  NCHC SLURM uses cgroup v2 for GPU
-isolation.  Without `--gpu-bind=per_task:1`, all 8 MPI ranks were mapped
+**Failure 1 — MPI serialization.** NCHC SLURM uses cgroup v2 for GPU
+isolation. Without `--gpu-bind=per_task:1`, all 8 MPI ranks were mapped
 to a single physical GPU. Even with correct cgroup binding, CUDA-Q 0.7.1's
 cuStateVec backend acquires a node-wide serialization lock through
 `/dev/nvidia-ctl` during `cudaq.sample()`, causing all ranks to execute
 sequentially: measured 6129 s for 50 particles vs. an expected 858 s.
 
-**Failure 2 — cudaMallocHost pinned memory leak.**  CUDA-Q 0.7.1 allocates
+**Failure 2 — cudaMallocHost pinned memory leak.** CUDA-Q 0.7.1 allocates
 approximately 2.5 GB of pinned memory per `cudaq.sample()` call via
 `cudaMallocHost`. This memory is managed by the CUDA driver, not the process
-heap; `del`, `gc.collect()`, and `malloc_trim(0)` are all ineffective.  The
+heap; `del`, `gc.collect()`, and `malloc_trim(0)` are all ineffective. The
 only release mechanism is CUDA context destruction, which is triggered only
-when the process exits.  Long-lived MPI ranks accumulate ~500 GB of pinned
+when the process exits. Long-lived MPI ranks accumulate ~500 GB of pinned
 memory across 4 batches of 50 particles before the kernel OOM-kills them.
 
-**v10.1 solution.**  Each call to `evaluate_fn` / `batch_evaluate_fn` spawns
-a fresh subprocess.  The parent sets `CUDA_VISIBLE_DEVICES=<gpu_id>` in the
-child's environment before `Popen()` — before any CUDA initialization — so
-the child sees exactly one GPU regardless of cgroup policy.  When the child
-exits after a single `cudaq.sample()`, the CUDA driver destroys the context
-and reclaims all pinned memory.  Peak concurrent pinned memory is bounded to
-8 × 2.5 GB = 20 GB.
+**v10.1 solution.** Each call to `batch_evaluate_fn` spawns fresh subprocesses.
+The parent sets `CUDA_VISIBLE_DEVICES=<gpu_id>` in the child's environment
+before `Popen()` — before any CUDA initialization — so the child sees exactly
+one GPU regardless of cgroup policy. When the child exits after a single
+`cudaq.sample()`, the CUDA driver destroys the context and reclaims all
+pinned memory. Peak concurrent pinned memory is bounded to 8 × 2.5 GB = 20 GB.
 
-### AE-SOQPSO Algorithm (v1.1 corrections)
+### AE-SOQPSO Algorithm
 
-Two bugs were corrected relative to v1.0 (both verified against
-arXiv:2311.12867v2):
+**v1.1 bug corrections** (verified against arXiv:2311.12867v2):
 
-**Bug 1 — mbest weighting.**  v1.0 used monotonically decreasing weights
-`w_k = 1/(k+1)` favoring only top-ranked particles.  The paper's AE-QTS
+**Bug 1 — mbest weighting.** v1.0 used monotonically decreasing weights
+`w_k = 1/(k+1)` favoring only top-ranked particles. The paper's AE-QTS
 Algorithm 3 applies rotation magnitude `Δθ/k` to both `best_k` and
 `worst_k`, producing a **U-shaped** weight profile: high influence at both
-ends, minimum in the middle.  v1.1 implements symmetric harmonic weighting:
+ends, minimum in the middle. v1.1 implements symmetric harmonic weighting:
 rank `k` and rank `M+1-k` each contribute `1/k`.
 
-**Bug 2 — paired update direction.**  v1.0 moved `worst_k` with Cauchy
-perturbation (random exploration).  The paper applies amplitude amplification
+**Bug 2 — paired update direction.** v1.0 moved `worst_k` with Cauchy
+perturbation (random exploration). The paper applies amplitude amplification
 to both `best_k` and `worst_k` — both move toward their local attractor
-`φ·pbest + (1-φ)·gbest` with step `rotate_factor/k`.  Cauchy mutation is a
+`φ·pbest + (1-φ)·gbest` with step `rotate_factor/k`. Cauchy mutation is a
 separate SOQPSO mechanism applied in the main loop; it does not belong inside
 the AE pairing step.
+
+---
+
+## v10.2 / v1.2 Changes (Current Version)
+
+Four changes relative to the V3 run (v10.1 / v1.1):
+
+### 1 — `num_sample = 5 000` (most impactful)
+
+Birthday-paradox analysis on V3 gbest data shows K ≈ 84 972 distinct valid
+molecules. Expected uniqueness at n=5 000 is 0.973 vs 0.947 at n=10 000,
+giving +0.024 on V×U with no algorithm change. Also aligns with Chen 2025
+for a fair comparison. Side effect: each subprocess evaluation drops from
+~284 s to ~142 s, halving total wall time.
+
+### 2 — Sobol scrambled initialization (`--sobol_init`, default on)
+
+Replaces pseudo-random particle positions with Owen-scrambled Sobol sequences
+(`scipy.stats.qmc.Sobol(d=134, scramble=True, seed=0)`). Benefits:
+
+- Deterministic and reproducible — no lucky-seed dependence
+- Guaranteed low discrepancy across all 134 dimensions
+- ~20% lower discrepancy vs random (measured: 1.20e-11 vs 1.51e-11)
+- `M = 64 = 2^6` satisfies Sobol's power-of-two requirement
+
+### 3 — Opposition-Based Learning Phase 0 (`--obl`, default on)
+
+After the standard Phase 0 evaluation of M particles, evaluates M
+"opposition particles" `x' = clip(1 − x, 0, 1)`. Whichever of (x, x') has
+higher fitness becomes the initial particle. Effective coverage doubles with
+only one extra batch. Only active in batch (multi-GPU) mode.
+
+Reference: Tizhoosh, H.R., *Opposition-Based Learning*, ISDA 2005.
+
+### 4 — V-U Decoupled mbest (`--vu_decouple`, default on)
+
+The standard AE-QTS U-shaped harmonic mbest is augmented with explicit
+pulls toward the best-V-ever position and best-U-ever position:
+
+```
+mbest = (w_vu × mbest_standard + w_v × best_v_pos + w_u × best_u_pos)
+        / (w_vu + w_v + w_u)
+```
+
+Default weights: `w_vu=0.70, w_v=0.15, w_u=0.15`. This addresses the
+joint-optimum problem where V★=1.000 and U★=0.986 are achieved by different
+particles that never converge into a single high-V×U solution.
 
 ---
 
@@ -194,41 +278,47 @@ the AE pairing step.
 | Parameter | Value | Notes |
 |---|---|---|
 | `num_heavy_atom` | 9 | 20-qubit circuit, 134 float params |
-| `num_sample` | 10000 | shots per `cudaq.sample()`, matches paper |
-| `particles (M)` | 50 | 134-D space; larger than paper's 30 Sobol init |
-| `iterations (T)` | 40 | `total_evals = 50 × 41 = 2050` |
+| `num_sample` | 5000 | shots per `cudaq.sample()`; matches Chen 2025 |
+| `particles (M)` | 64 | `= 2^6` for Sobol uniformity guarantee |
+| `iterations (T)` | 120 | `total_evals ≈ 64 × 121 + 64 (OBL) = 7808` |
 | `n_gpus` | 8 | subprocess pool width |
 | `alpha_max / min` | 1.2 / 0.4 | cosine annealing bounds |
-| `mutation_prob` | 0.12 | Cauchy heavy-tail mutation rate |
-| `stagnation_limit` | 8 | iterations before reinit triggers |
-| `reinit_fraction` | 0.20 | fraction of worst particles replaced |
-| `ae_weighting` | True | U-shaped harmonic mbest (v1.1) |
+| `mutation_prob` | 0.15 | Cauchy heavy-tail mutation rate |
+| `stagnation_limit` | 12 | iterations before reinit triggers |
+| `reinit_fraction` | 0.25 | fraction of worst particles replaced |
+| `ae_weighting` | True | U-shaped harmonic mbest (v1.1 fix) |
 | `pair_interval` | 5 | AE paired update every N QPSO iterations |
-| `rotate_factor` | 0.01 | paired update step `Δθ/k` scaling |
+| `rotate_factor` | 0.015 | paired update step `Δθ/k` scaling |
+| `obl` | True | OBL Phase 0 (v1.2) |
+| `vu_decouple` | True | V-U decoupled mbest (v1.2) |
+| `w_vu / w_v / w_u` | 0.70 / 0.15 / 0.15 | VU-decouple mbest weights |
 
 ---
 
-## Quick Start
-
-### Step 1 — Verify environment
+## Quick Debug Flow
 
 ```bash
-conda activate cudaq-v071
+cd ~/sqmg_project-cudaq
+git pull origin main
 
+# 1. Import check
 python -c "
 import cudaq, numpy as np
+from scipy.stats import qmc
 from qmg.utils import ConditionalWeightsGenerator
 from qpso_optimizer_ae import AESOQPSOOptimizer
-print('imports OK')
-print('cudaq :', cudaq.__version__)    # must be 0.7.1.x
-print('numpy :', np.__version__)       # must be < 2.0
+print('imports OK | cudaq', cudaq.__version__, '| numpy', np.__version__)
 "
-```
 
-### Step 2 — Single-GPU smoke test (~2 min)
+# 2. Sobol check
+python -c "
+from scipy.stats import qmc
+s = qmc.Sobol(d=134, scramble=True, seed=0)
+p = s.random(n=64)
+print('Sobol OK | shape', p.shape, '| disc', qmc.discrepancy(p))
+"
 
-```bash
-# Generate a test weight file
+# 3. Single-GPU worker smoke test
 python -c "
 import numpy as np
 from qmg.utils import ConditionalWeightsGenerator
@@ -238,133 +328,145 @@ np.save('/tmp/smoke_w.npy', w)
 print('weight len =', len(w))   # must be 134
 "
 
-# Evaluate on GPU 0
 CUDA_VISIBLE_DEVICES=0 python worker_eval.py \
     --weight_path /tmp/smoke_w.npy \
     --result_path /tmp/smoke_r.npy \
-    --num_heavy_atom 9 \
-    --num_sample 200 \
-    --backend cudaq_nvidia
+    --num_heavy_atom 9 --num_sample 100 --backend cudaq_nvidia
 
-# Verify result
 python -c "
 import numpy as np
 r = np.load('/tmp/smoke_r.npy')
 print(f'V={r[0]:.3f}  U={r[1]:.3f}')
 assert r[0] > 0, 'V=0, GPU not working'
-print('worker_eval smoke test PASSED')
+print('worker_eval single-GPU OK')
 "
 ```
 
-### Step 3 — Multi-GPU parallel verification (~3 min)
+---
+
+## Sanity Check (multi-GPU, ~5 min)
 
 ```bash
 python run_qpso_qmg_cudaq.py \
-    --backend cudaq_nvidia \
-    --n_gpus 8 \
-    --gpu_ids 0,1,2,3,4,5,6,7 \
-    --particles 8 \
-    --iterations 1 \
-    --num_sample 100 \
-    --subprocess_timeout 120 \
-    --task_name sanity_check \
-    --data_dir results_sanity
+    --backend        cudaq_nvidia         \
+    --num_sample     100                  \
+    --particles      8                    \
+    --iterations     1                    \
+    --n_gpus         8                    \
+    --gpu_ids        0,1,2,3,4,5,6,7     \
+    --subprocess_timeout 120              \
+    --sobol_init                          \
+    --obl                                 \
+    --vu_decouple                         \
+    --task_name      sanity_v6            \
+    --data_dir       results_sanity_v6
 ```
 
-Expected log output:
+Expected log lines confirming v10.2 features are active:
 
 ```
-[v10.1] 並行功能驗證：同時啟動 8 個子行程（各 5 shots）...
-  GPU 0: V=0.XXX  U=0.XXX  ✓
-  ...
-  GPU 7: V=0.XXX  U=0.XXX  ✓
-[v10.1] 並行驗證完成（XXXs）  ✓ 所有 GPU 正常
+[Sobol v10.2] 初始化完成  n=8  d=134  discrepancy=...
+[OBL v1.2] Phase 0 對立粒子評估（8 個對立位置）...
+[OBL v1.2] 完成（...s），替換 N/8 個粒子，gbest=...
+[AE-QPSO v1.2 Iter   1/1] α=...
 ```
 
 Verify parallelism by watching GPU utilization during the test:
 
 ```bash
-# In a second tmux pane — do NOT use "watch -n 5 nvidia-smi" (segfaults on DGX111)
+# DO NOT use "watch -n 5 nvidia-smi" on DGX111 — it causes segfault
 while true; do clear; nvidia-smi; sleep 10; done
 ```
 
-All 8 GPUs should show GPU-Util > 80 % simultaneously during each round.
+All 8 GPUs should show GPU-Util > 80% simultaneously during each round.
 
 ---
 
-## Full Experiment
+## Full V6 Experiment
 
 Run inside a tmux session to survive SSH disconnects:
 
 ```bash
-tmux new -s qmg_main
+tmux new -s qmg_v6
 conda activate cudaq-v071
 cd ~/sqmg_project-cudaq
 git pull origin main
 
 python run_qpso_qmg_cudaq.py \
-    --backend             cudaq_nvidia                     \
-    --num_heavy_atom      9                                \
-    --num_sample          10000                            \
-    --particles           50                               \
-    --iterations          40                               \
-    --n_gpus              8                                \
-    --gpu_ids             0,1,2,3,4,5,6,7                 \
-    --subprocess_timeout  600                              \
-    --alpha_max           1.2                              \
-    --alpha_min           0.4                              \
-    --mutation_prob       0.12                             \
-    --stagnation_limit    8                                \
-    --reinit_fraction     0.20                             \
-    --ae_weighting                                         \
-    --pair_interval       5                                \
-    --rotate_factor       0.01                             \
-    --seed                42                               \
-    --task_name           unconditional_9_ae_parallel_v101 \
-    --data_dir            results_parallel_v101
+    --backend             cudaq_nvidia                      \
+    --num_heavy_atom      9                                 \
+    --num_sample          5000                              \
+    --particles           64                                \
+    --iterations          120                               \
+    --n_gpus              8                                 \
+    --gpu_ids             0,1,2,3,4,5,6,7                  \
+    --subprocess_timeout  360                               \
+    --sobol_init                                            \
+    --obl                                                   \
+    --vu_decouple                                           \
+    --w_vu                0.70                              \
+    --w_v                 0.15                              \
+    --w_u                 0.15                              \
+    --alpha_max           1.2                               \
+    --alpha_min           0.4                               \
+    --mutation_prob       0.15                              \
+    --stagnation_limit    12                                \
+    --reinit_fraction     0.25                              \
+    --ae_weighting                                          \
+    --pair_interval       5                                 \
+    --rotate_factor       0.015                             \
+    --seed                0                                 \
+    --task_name           unconditional_9_ae_v6_sobol_obl  \
+    --data_dir            results_v6
 ```
 
-### Timing estimate (8 × V100)
+### Timing estimate (V100 × 8, num_sample=5 000)
 
 ```
-Single evaluation  :  ~122.6 s  (10 000 shots, cudaq_nvidia)
-Rounds per iter    :  ⌈50/8⌉ = 7 rounds
-Time per iter      :  7 × 122.6 s ≈  858 s  (≈ 14 min)
-Phase 0            :                  858 s
-40 iterations      :  40 × 858 s = 34 320 s  (≈ 9.5 h)
-Total (T=40)       :                ~9.8 h
-Total evals        :  50 × 41 = 2 050
+Single evaluation  :  ~142 s  (5 000 shots, cudaq_nvidia)
+Rounds per iter    :  ⌈64/8⌉ = 8 rounds
+Time per iter      :  8 × 142 s ≈ 1 136 s  (≈ 19 min)
+Phase 0 + OBL      :  2 batches × 1 136 s  ≈ 38 min
+Full run T=120     :  122 batches × 1 136 s ≈ 38.5 h
+Total evals        :  64 × 121 + 64 (OBL) = 7 808
 ```
 
 ### Output files
 
 ```
-results_parallel_v101/
-├── unconditional_9_ae_parallel_v101.log          # full run log
-├── unconditional_9_ae_parallel_v101.csv          # per-evaluation metrics
-└── unconditional_9_ae_parallel_v101_best_params.npy  # 134-float best weights
+results_v6/
+├── unconditional_9_ae_v6_sobol_obl.log
+├── unconditional_9_ae_v6_sobol_obl.csv
+└── unconditional_9_ae_v6_sobol_obl_best_params.npy
 ```
 
-### Monitoring
+---
+
+## Monitoring
 
 ```bash
-# Real-time log tail
-tail -f results_parallel_v101/unconditional_9_ae_parallel_v101.log
+# GPU utilization — DO NOT use `watch -n 5 nvidia-smi` on DGX111 (causes segfault)
+while true; do clear; nvidia-smi; sleep 10; done
 
-# Check current gbest
-grep "🔥 New gbest" results_parallel_v101/*.log | tail -5
+# Follow log
+tail -f results_v6/unconditional_9_ae_v6_sobol_obl.log
 
-# Per-iteration summary
-grep "AE-QPSO Iter" results_parallel_v101/*.log
+# Check current best
+grep "🔥 New gbest" results_v6/unconditional_9_ae_v6_sobol_obl.log | tail -5
 
-# Verify parallelism: each round should complete in ~120–150 s
-grep "parallel 輪次" results_parallel_v101/*.log | head -20
+# Iteration summary
+grep "AE-QPSO v1.2 Iter" results_v6/unconditional_9_ae_v6_sobol_obl.log | tail -20
 
-# Memory stability check (should stay < 600 MB throughout)
-grep "\[MEM\]" results_parallel_v101/*.log
+# Verify parallelism: each round should complete in ~130–160 s
+grep "parallel 輪次" results_v6/unconditional_9_ae_v6_sobol_obl.log | head -20
+
+# Memory stability check (main process should stay < 600 MB throughout)
+grep "\[MEM\]" results_v6/unconditional_9_ae_v6_sobol_obl.log | tail -10
 ```
 
-### Reproducing the best molecule after the run
+---
+
+## Reproduce Best Result (V3)
 
 ```bash
 python -c "
@@ -372,17 +474,17 @@ import numpy as np
 from qmg.utils import ConditionalWeightsGenerator
 from qmg.generator_cudaq import MoleculeGeneratorCUDAQ
 
-best_w = np.load('results_parallel_v101/unconditional_9_ae_parallel_v101_best_params.npy')
-cwg = ConditionalWeightsGenerator(9, smarts=None)
-w_c = cwg.apply_chemistry_constraint(best_w.copy())
+best_w = np.load('results_v3/unconditional_9_ae_v3_M56T120_best_params.npy')
+cwg    = ConditionalWeightsGenerator(9, smarts=None)
+w_c    = cwg.apply_chemistry_constraint(best_w.copy())
 
 gen = MoleculeGeneratorCUDAQ(9, all_weight_vector=w_c, backend_name='cudaq_nvidia')
-sd, v, u = gen.sample_molecule(10000)
-print(f'V={v:.4f}  U={u:.4f}  V*U={v*u:.6f}')
+sd, v, u = gen.sample_molecule(5000)   # use 5000 to match Chen 2025
+print(f'V={v:.4f}  U={u:.4f}  V×U={v*u:.6f}')
 valid = [k for k in sd if k and k != 'None']
 print(f'Unique valid SMILES: {len(valid)}')
-for s in valid[:10]:
-    print(' ', s)
+for smi in valid[:10]:
+    print(' ', smi)
 "
 ```
 
@@ -390,14 +492,14 @@ for s in valid[:10]:
 
 ## MPI Fallback (run_qpso_qmg_mpi.py v1.3)
 
-Use only if the cluster admin confirms `--gpu-bind=per_task:1` is supported
+Use **only** if the cluster admin confirms `--gpu-bind=per_task:1` is supported
 and the cuStateVec serialization lock has been addressed.
 
 **v1.3 fixes a deadlock** introduced in v1.2: `_COMM.Barrier()` inside
 `batch_evaluate_fn` (called only by rank 0) conflicted with non-rank-0's
 `_COMM.bcast(flag)`, causing a permanent hang whenever `reinit_every`
-triggered.  v1.3 folds the rebuild signal into the existing flag bcast as
-`_MPI_FLAG_REBUILD = 2`, eliminating the independent barrier.
+triggered. v1.3 folds the rebuild signal into the existing flag bcast as
+`_MPI_FLAG_REBUILD = 2`, eliminating the independent barrier entirely.
 
 Verify GPU binding before submitting:
 
@@ -416,12 +518,12 @@ tail -f results_mpi_v12/unconditional_9_ae_mpi_v12.log
 
 ---
 
-## Known Constraints and Gotchas
+## Known Issues and Constraints
 
 | Issue | Constraint / Workaround |
 |---|---|
 | `watch -n 5 nvidia-smi` segfaults on DGX111 | Use `while true; do clear; nvidia-smi; sleep 10; done` |
-| `@cudaq.kernel` tests fail with `python -c` | Write to a `.py` file; `inspect.getsource()` requires it |
+| `@cudaq.kernel` tests fail with `python -c` | Write to a `.py` file; CUDA-Q uses `inspect.getsource()` internally |
 | `tensornet` backend hangs with dynamic circuits | **Blocked in worker_eval.py v10.2.** Never use `--backend cudaq_tensornet` |
 | `list[float]` broadcast dispatch bug (CUDA-Q 0.7.1) | Fixed in `_qmg_n9` v9.1: every `mz()` assignment on its own line |
 | `get_sequential_data()` returns `list[str]`, not `int` | Fixed in v9.5: use `int(bit)` not `1 if bit else 0` |
@@ -430,17 +532,42 @@ tail -f results_mpi_v12/unconditional_9_ae_mpi_v12.log
 | AE-QTS paired update Cauchy misuse | Fixed in v1.1: both `best_k` and `worst_k` move toward their local attractor |
 | CUDA-Q >= 0.8 drops sm_70 SASS | Pinned to `cuda-quantum-cu12==0.7.1`; do not upgrade |
 | NumPy 2.x incompatibility | Hard constraint: `numpy < 2.0` |
-| Pinned memory leak | subprocess pool: each worker exits after one `cudaq.sample()`, releasing all pinned memory |
+| Pinned memory leak (cudaMallocHost) | Subprocess pool: each worker exits after one `cudaq.sample()`, releasing all pinned memory |
+| MPI serialization via `/dev/nvidia-ctl` mutex | subprocess pool is the primary path; MPI is fallback only |
+| Sobol requires `M = 2^k` for full uniformity | Default `M=64 = 2^6`; non-power-of-two triggers a warning but still works |
+
+---
+
+## Algorithm Version History
+
+| File | Version | Key changes |
+|---|---|---|
+| `qpso_optimizer_ae.py` | v1.0 | Initial AE-SOQPSO |
+| `qpso_optimizer_ae.py` | v1.1 | Fix U-shaped weighting bug; fix paired-update Cauchy bug |
+| `qpso_optimizer_ae.py` | **v1.2** | **OBL Phase 0; V-U decoupled mbest** |
+| `run_qpso_qmg_cudaq.py` | v9.6 | Subprocess isolation (memory leak fix) |
+| `run_qpso_qmg_cudaq.py` | v10.1 | Parallel 8-GPU subprocess pool (MPI abandoned) |
+| `run_qpso_qmg_cudaq.py` | **v10.2** | **num_sample=5000; Sobol init; OBL; VU-decouple flags** |
+| `worker_eval.py` | v10.2 | Remove tensornet from choices; default backend fix |
+| `qmg/generator_cudaq.py` | v10.0 | TensorNet backend stubs; malloc_trim |
+| `qmg/utils/build_dynamic_circuit_cudaq.py` | v9.1 | Semicolon AST fix; parametric kernel |
+| `run_qpso_qmg_mpi.py` | v1.3 | Fix Barrier deadlock via MPI_FLAG_REBUILD |
 
 ---
 
 ## References
 
-- Chen et al. 2025, JCTC — *Exploring Chemical Space with Chemistry-Inspired
-  Dynamic Quantum Circuits in the NISQ Era* (PDF included in repo)
-- Xiao et al. 2026, arXiv:2604.13877v1 — *SQMG*
-- Tseng et al. 2024, arXiv:2311.12867v2 — *AE-QTS*
-- Sun et al. 2012, CEC — *QPSO*, Eq. 12
+1. Chen, L.-Y. et al. *Exploring Chemical Space with Chemistry-Inspired
+   Dynamic Quantum Circuits in the NISQ Era.* JCTC 2025.
+   DOI: 10.1021/acs.jctc.5c00305
+2. Xiao, Y.-C. et al. *Scalable Quantum Molecular Generation via
+   GPU-Accelerated Tensor-Network Simulation.* arXiv:2604.13877v1, 2026.
+3. Tseng, K.-C. et al. *Amplitude-Ensemble Quantum-Inspired Tabu Search
+   Algorithm for Solving 0/1 Knapsack Problems.* arXiv:2311.12867v2, 2024.
+4. Sun, J. et al. *A Global Search Strategy of Quantum-Behaved Particle
+   Swarm Optimization.* CEC 2012.
+5. Tizhoosh, H. R. *Opposition-Based Learning: A New Scheme for Machine
+   Intelligence.* ISDA 2005.
 
 For the complete debug runbook, infrastructure diagnosis, and recovery
 procedures see
