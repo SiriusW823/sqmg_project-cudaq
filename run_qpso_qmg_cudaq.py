@@ -272,6 +272,10 @@ def parse_args() -> argparse.Namespace:
                    help="V-U 解耦 mbest 中 V* 位置的牽引權重")
     p.add_argument("--w_u",  type=float, default=0.15,
                    help="V-U 解耦 mbest 中 U* 位置的牽引權重")
+    p.add_argument("--min_u_for_v_track", type=float, default=0.50,
+                   help="更新 V* 牽引位置時要求的最低 uniqueness 門檻")
+    p.add_argument("--min_v_for_u_track", type=float, default=0.50,
+                   help="更新 U* 牽引位置時要求的最低 validity 門檻")
 
     # ── 輸出設定 ──────────────────────────────────────────────────────────
     p.add_argument("--task_name", type=str,
@@ -636,7 +640,7 @@ def main() -> None:
     )
     logger.info(
         f"[v10.2] V-U 解耦 mbest: "
-        f"{'✓ 開啟 (w_vu={:.2f}, w_v={:.2f}, w_u={:.2f})'.format(args.w_vu, args.w_v, args.w_u) if args.vu_decouple else '✗ 關閉'}"
+        f"{'✓ 開啟 (w_vu={:.2f}, w_v={:.2f}, w_u={:.2f}, U_gate={:.2f}, V_gate={:.2f})'.format(args.w_vu, args.w_v, args.w_u, args.min_u_for_v_track, args.min_v_for_u_track) if args.vu_decouple else '✗ 關閉'}"
     )
     logger.info(
         f"[v10.1→v10.2] 評估模式: parallel subprocess pool  "
@@ -739,6 +743,8 @@ def main() -> None:
         w_vu               = args.w_vu,
         w_v                = args.w_v,
         w_u                = args.w_u,
+        min_u_for_v_track  = args.min_u_for_v_track,
+        min_v_for_u_track  = args.min_v_for_u_track,
     )
 
     # ── ★ v10.2：Sobol 初始化覆寫粒子位置 ────────────────────────────────
