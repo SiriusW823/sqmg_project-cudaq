@@ -1,7 +1,13 @@
 """
 ==============================================================================
-run_qpso_qmg_cudaq.py  — CUDA-Q 0.7.1 + AE-SOQPSO  (v10.2 Sobol+OBL 版)
+run_qpso_qmg_cudaq.py  — CUDA-Q 0.7.1 + AE-SOQPSO  (v10.3 / V8)
 ==============================================================================
+
+v10.2 → v10.3  (V8)：
+  - --iterations 預設 120 → 150
+  - --alpha_min 0.40 → 0.30、--pair_interval 5 → 4（對齊 optimizer v1.5 預設）
+  - 新增 --mode_collapse_u_thresh（預設 0.20），接進 AESOQPSOOptimizer
+  - 搭配 qpso_optimizer_ae.py v1.5（mode collapse 回收 + adaptive V-U 權重）
 
 v10.1 → v10.2  四項核心改動：
 
@@ -540,7 +546,7 @@ def verify_workers_parallel(
     gpu_ids:       list,
 ) -> bool:
     logger.info(
-        f"[v10.2] 並行功能驗證：同時啟動 {len(gpu_ids)} 個子行程（各 5 shots）..."
+        f"[v10.3] 並行功能驗證：同時啟動 {len(gpu_ids)} 個子行程（各 5 shots）..."
     )
     pythonpath = os.environ.get("PYTHONPATH", ".")
     w_test = cwg.generate_conditional_random_weights(random_seed=99)
@@ -604,7 +610,7 @@ def verify_workers_parallel(
 
     elapsed = time.time() - t0
     logger.info(
-        f"[v10.2] 並行驗證完成（{elapsed:.1f}s）  "
+        f"[v10.3] 並行驗證完成（{elapsed:.1f}s）  "
         f"{'✓ 所有 GPU 正常' if all_ok else '✗ 有 GPU 失敗'}"
     )
     return all_ok
@@ -637,21 +643,21 @@ def main() -> None:
     logger.info(f"disable_connectivity_position: []")
     logger.info(f"CUDA-Q backend: {args.backend}")
     logger.info(
-        f"[v10.2] 初始化策略: "
+        f"[v10.3] 初始化策略: "
         f"{'Sobol scrambled (seed=0, 確定性)' if args.sobol_init else f'pseudo-random (seed={args.seed})'}"
     )
     logger.info(
-        f"[v10.2] OBL Phase 0: {'✓ 開啟' if args.obl else '✗ 關閉'}"
+        f"[v10.3] OBL Phase 0: {'✓ 開啟' if args.obl else '✗ 關閉'}"
     )
     logger.info(
-        f"[v10.2] V-U 解耦 mbest: "
+        f"[v10.3] V-U 解耦 mbest: "
         f"{'✓ 開啟 (w_vu={:.2f}, w_v={:.2f}, w_u={:.2f}, U_gate={:.2f}, V_gate={:.2f})'.format(args.w_vu, args.w_v, args.w_u, args.min_u_for_v_track, args.min_v_for_u_track) if args.vu_decouple else '✗ 關閉'}"
     )
     logger.info(
         f"[v10.1→v10.2] 評估模式: parallel subprocess pool  "
         f"N_GPUS={effective_n_gpus}  GPU_IDs={gpu_ids}"
     )
-    logger.info(f"[v10.2] subprocess_timeout: {args.subprocess_timeout}s")
+    logger.info(f"[v10.3] subprocess_timeout: {args.subprocess_timeout}s")
     log_gpu_info(logger, gpu_ids)
     log_memory(logger, "啟動時")
 
@@ -711,7 +717,7 @@ def main() -> None:
             gpu_id=str(gpu_ids[0]),
         )
         batch_evaluate_fn = None
-        logger.info(f"[v10.2] 使用 單GPU 序列模式（GPU {gpu_ids[0]}）")
+        logger.info(f"[v10.3] 使用 單GPU 序列模式（GPU {gpu_ids[0]}）")
     else:
         evaluate_fn       = None
         batch_evaluate_fn = make_parallel_batch_evaluate_fn(
@@ -720,10 +726,10 @@ def main() -> None:
             gpu_ids=gpu_ids,
         )
         logger.info(
-            f"[v10.2] 使用 {effective_n_gpus}-GPU 並行模式  GPU IDs: {gpu_ids}"
+            f"[v10.3] 使用 {effective_n_gpus}-GPU 並行模式  GPU IDs: {gpu_ids}"
         )
 
-    # ── 建立 AESOQPSOOptimizer v1.2 ───────────────────────────────────────
+    # ── 建立 AESOQPSOOptimizer v1.5 (V8) ──────────────────────────────────
     optimizer = AESOQPSOOptimizer(
         n_params           = n_flexible,
         n_particles        = args.particles,
@@ -773,7 +779,7 @@ def main() -> None:
             )
     else:
         logger.info(
-            f"[v10.2] 使用 pseudo-random 初始化  seed={args.seed}"
+            f"[v10.3] 使用 pseudo-random 初始化  seed={args.seed}"
         )
 
     # ── 執行優化 ──────────────────────────────────────────────────────────

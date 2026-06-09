@@ -1,7 +1,12 @@
 """
 ==============================================================================
-build_dynamic_circuit_cudaq.py  (v9.1 — 分號修正版)
+build_dynamic_circuit_cudaq.py  (v9.2 / V8 — 價電子感知鍵修正)
 ==============================================================================
+
+v9.1 → v9.2  (V8)：
+  ★ apply_bond_disconnection_correction 改為價電子感知版：
+      孤立重原子改連到「剩餘價數 margin 最大且 >0」的既有原子（單鍵 '01'），
+      MAX_VALENCE={0:無, 1:C=4, 2:O=2, 3:N=3}；找不到才 fallback 回 v9.1 原行為。
 
 v9 → v9.1 修正：
 
@@ -528,12 +533,12 @@ def make_qmg_n9_kernel(weights=None):
 
 
 # ===========================================================================
-# DynamicCircuitBuilderCUDAQ  (v9.1)
+# DynamicCircuitBuilderCUDAQ  (v9.2)
 # ===========================================================================
 
 class DynamicCircuitBuilderCUDAQ:
     """
-    CUDA-Q 0.7.1 版 QMG 動態電路建構器（v9.1 分號修正版）。
+    CUDA-Q 0.7.1 版 QMG 動態電路建構器（v9.2 / V8 價電子感知版）。
 
     設計說明：
       - 使用 module-level parametric kernel _qmg_n9(w: list[float])

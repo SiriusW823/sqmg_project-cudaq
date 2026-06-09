@@ -1,8 +1,21 @@
 """
 ==============================================================================
 qpso_optimizer_ae.py
-AE-SOQPSO v1.4 — 基於論文的全面修正版
+AE-SOQPSO v1.5 (V8) — 基於論文的全面修正版
 ==============================================================================
+
+v1.4 → v1.5  (V8)  三項演算法增強：
+
+  ★ [V8-1] mode collapse 防護 + 回收
+      _update_pbest 新增 uniqueness 門檻（mode_collapse_u_thresh=0.20）：
+      uniqueness 過低的退化解不更新 pbest；評估時標記 _collapse_flags，
+      於每個 t>0 迭代開頭把被標記粒子重置到 gbest ± 0.25×範圍（保留 pbest）。
+
+  ★ [V8-2] _apply_vu_pull adaptive V-U 權重
+      依 |V−U| gap 對「binding（較低）的目標」加碼 extra=min(gap×2, 0.15)，
+      正規化後權重總和維持 1.0（= w_vu + w_v + w_u）。
+
+  ★ [V8-3] 預設值微調：alpha_min 0.40→0.30，pair_interval 5→4。
 
 v1.3 → v1.4  核心演算法修正（基於三篇論文原文的逐行對照審查）：
 
@@ -526,7 +539,7 @@ class AESOQPSOOptimizer:
         self.logger.info(f"validity (maximize): {v:.3f}")
         self.logger.info(f"uniqueness (maximize): {u:.3f}")
         self.logger.info(
-            f"  [AE-QPSO v1.4] iter={qpso_iter}  p={particle_id}  "
+            f"  [AE-QPSO v1.5] iter={qpso_iter}  p={particle_id}  "
             f"fit={f:.4f}  gbest={self.gbest_fit:.4f}  "
             f"stag={self._stag_counter}  α={alpha:.4f}  t={elapsed:.1f}s  "
             f"[V⋆={self._best_v_ever:.3f}({self._best_qualified_v_val:.3f}✦) "
@@ -571,7 +584,7 @@ class AESOQPSOOptimizer:
         total_evals = self.M * (self.T + 1) + obl_evals
 
         self.logger.info("=" * 70)
-        self.logger.info("AE-SOQPSO（v1.4 AE-QTS 符號修正版）優化啟動")
+        self.logger.info("AE-SOQPSO（v1.5/V8 AE-QTS 符號修正版）優化啟動")
         self.logger.info(f"  粒子數 M               : {self.M}")
         self.logger.info(f"  參數維度 D              : {self.D}")
         self.logger.info(f"  最大迭代 T              : {self.T}")
@@ -729,7 +742,7 @@ class AESOQPSOOptimizer:
                 'alpha':             alpha,
             })
             self.logger.info(
-                f"  [AE-QPSO v1.4 Iter {t+1:3d}/{self.T}] "
+                f"  [AE-QPSO v1.5 Iter {t+1:3d}/{self.T}] "
                 f"α={alpha:.3f}  "
                 f"gbest={self.gbest_fit:.4f} (V={self.gbest_val:.3f} U={self.gbest_uniq:.3f})  "
                 f"mean={mean_fit:.4f}  max={max_fit:.4f}  "
@@ -740,7 +753,7 @@ class AESOQPSOOptimizer:
 
         # ── 最終摘要 ────────────────────────────────────────────────────────
         self.logger.info("=" * 70)
-        self.logger.info("AE-SOQPSO 優化完成（v1.4）")
+        self.logger.info("AE-SOQPSO 優化完成（v1.5/V8）")
         self.logger.info(f"  Best V×U                : {self.gbest_fit:.6f}")
         self.logger.info(f"  Best V                  : {self.gbest_val:.4f}")
         self.logger.info(f"  Best U                  : {self.gbest_uniq:.4f}")
