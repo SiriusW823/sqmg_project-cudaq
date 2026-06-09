@@ -206,7 +206,7 @@ def parse_args() -> argparse.Namespace:
             "確保 Sobol 序列的均勻性保證完整成立。"
         ),
     )
-    p.add_argument("--iterations",        type=int,   default=120)
+    p.add_argument("--iterations",        type=int,   default=150)  # v10.3(V8): 120 → 150
     p.add_argument("--seed",              type=int,   default=0,
                    help="QPSO 更新的隨機種子（位置更新、Cauchy mutation 用）。"
                         "Sobol 模式下不影響初始化。")
@@ -236,7 +236,7 @@ def parse_args() -> argparse.Namespace:
 
     # ── SOQPSO 超參數 ─────────────────────────────────────────────────────
     p.add_argument("--alpha_max",          type=float, default=1.2)
-    p.add_argument("--alpha_min",          type=float, default=0.4)
+    p.add_argument("--alpha_min",          type=float, default=0.3)  # v10.3(V8): 對齊 optimizer
     p.add_argument("--mutation_prob",      type=float, default=0.15)
     p.add_argument("--stagnation_limit",   type=int,   default=12)
     p.add_argument("--reinit_fraction",    type=float, default=0.25)
@@ -244,7 +244,7 @@ def parse_args() -> argparse.Namespace:
     # ── AE-QTS 超參數 ─────────────────────────────────────────────────────
     p.add_argument("--ae_weighting",    action="store_true",  default=True)
     p.add_argument("--no_ae_weighting", action="store_false", dest="ae_weighting")
-    p.add_argument("--pair_interval",   type=int,   default=5)
+    p.add_argument("--pair_interval",   type=int,   default=4)  # v10.3(V8): 對齊 optimizer
     p.add_argument("--rotate_factor",   type=float, default=0.015)
 
     # ── ★ v10.2 OBL ──────────────────────────────────────────────────────
@@ -276,6 +276,11 @@ def parse_args() -> argparse.Namespace:
                    help="更新 V* 牽引位置時要求的最低 uniqueness 門檻")
     p.add_argument("--min_v_for_u_track", type=float, default=0.50,
                    help="更新 U* 牽引位置時要求的最低 validity 門檻")
+
+    # ── ★ v10.3(V8) mode collapse 防護/回收 ──────────────────────────────
+    p.add_argument("--mode_collapse_u_thresh", type=float, default=0.20,
+                   help="uniqueness 低於此值的粒子視為 mode collapse："
+                        "不更新 pbest，並於下一迭代開頭重置至 gbest 鄰域")
 
     # ── 輸出設定 ──────────────────────────────────────────────────────────
     p.add_argument("--task_name", type=str,
@@ -745,6 +750,8 @@ def main() -> None:
         w_u                = args.w_u,
         min_u_for_v_track  = args.min_u_for_v_track,
         min_v_for_u_track  = args.min_v_for_u_track,
+        # ★ v10.3(V8) 新增參數
+        mode_collapse_u_thresh = args.mode_collapse_u_thresh,
     )
 
     # ── ★ v10.2：Sobol 初始化覆寫粒子位置 ────────────────────────────────

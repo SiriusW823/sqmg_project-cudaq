@@ -114,7 +114,7 @@ class AESOQPSOOptimizer:
         batch_evaluate_fn:   Optional[Callable[[np.ndarray], List[Tuple[float, float]]]] = None,
         seed:                int   = 42,
         alpha_max:           float = 1.2,
-        alpha_min:           float = 0.4,
+        alpha_min:           float = 0.3,   # v1.5(V8): 0.40 → 0.30
         data_dir:            str   = "results_ae_qpso",
         task_name:           str   = "unconditional_9_ae_qpso",
         stagnation_limit:    int   = 12,
@@ -124,7 +124,7 @@ class AESOQPSOOptimizer:
         alpha_perturb_std:   float = 0.04,
         alpha_stag_boost:    float = 0.20,
         ae_weighting:        bool  = True,
-        pair_interval:       int   = 5,
+        pair_interval:       int   = 4,     # v1.5(V8): 5 → 4
         rotate_factor:       float = 0.015,
         obl:                 bool  = True,
         vu_decouple:         bool  = True,
@@ -133,6 +133,7 @@ class AESOQPSOOptimizer:
         w_u:                 float = 0.15,
         min_u_for_v_track:   float = 0.50,   # v1.3
         min_v_for_u_track:   float = 0.50,   # v1.3
+        mode_collapse_u_thresh: float = 0.20,  # v1.5(V8): mode collapse 門檻
     ):
         if evaluate_fn is None and batch_evaluate_fn is None:
             raise ValueError("必須提供 evaluate_fn 或 batch_evaluate_fn 其中一個。")
@@ -163,6 +164,11 @@ class AESOQPSOOptimizer:
         self.w_u               = w_u
         self.min_u_for_v_track = min_u_for_v_track   # v1.3
         self.min_v_for_u_track = min_v_for_u_track   # v1.3
+
+        # ── v1.5(V8) mode collapse 防護/回收 ──
+        self.mode_collapse_u_thresh = mode_collapse_u_thresh
+        self._collapse_flags        = np.zeros(self.M, dtype=bool)
+        self._total_recycled        = 0
 
         self.lb = np.zeros(self.D, dtype=np.float64)
         self.ub = np.ones(self.D,  dtype=np.float64)
@@ -351,14 +357,26 @@ class AESOQPSOOptimizer:
         當 _best_v_pos 或 _best_u_pos 為 None（品質門檻未通過）時，
         對應的 w_v/w_u 不計入 active_w，分母自動重新標準化。
         """
+        # ── v1.5(V8) adaptive V-U 權重 ──
+        # 對「binding（目前較低）的目標」加碼 extra，引導 mbest 朝瓶頸方向收斂。
+        # 正規化（除以 active_w）後權重總和回到 1.0 = w_vu+w_v+w_u（預設）。
+        gap   = abs(self.gbest_val - self.gbest_uniq)
+        extra = min(gap * 2.0, 0.15)
+        if self.gbest_val <= self.gbest_uniq:   # V 是 binding（較低）→ 加碼 w_v
+            w_v_eff = self.w_v + extra
+            w_u_eff = self.w_u
+        else:                                   # U 是 binding（較低）→ 加碼 w_u
+            w_v_eff = self.w_v
+            w_u_eff = self.w_u + extra
+
         components = [self.w_vu * mbest]
         active_w   = self.w_vu
         if self._best_v_pos is not None:
-            components.append(self.w_v * self._best_v_pos)
-            active_w += self.w_v
+            components.append(w_v_eff * self._best_v_pos)
+            active_w += w_v_eff
         if self._best_u_pos is not None:
-            components.append(self.w_u * self._best_u_pos)
-            active_w += self.w_u
+            components.append(w_u_eff * self._best_u_pos)
+            active_w += w_u_eff
         return sum(components) / active_w
 
     # ================================================================
@@ -440,7 +458,10 @@ class AESOQPSOOptimizer:
     # pbest / gbest 更新（v1.3 品質門檻保留）
     # ================================================================
 
-    def _update_pbest(self, i: int, fit: float):
+    def _update_pbest(self, i: int, fit: float, uniq: float = None):
+        # v1.5(V8) mode collapse 防護：uniqueness 過低時不更新 pbest（避免退化解污染）
+        if uniq is not None and uniq < self.mode_collapse_u_thresh:
+            return
         if fit > self.pbest_fit[i]:
             self.pbest[i]     = self.positions[i].copy()
             self.pbest_fit[i] = fit
@@ -587,8 +608,10 @@ class AESOQPSOOptimizer:
             per_particle_elapsed = elapsed_batch / max(self.M, 1)
             for i, (v, u) in enumerate(batch_results):
                 f = float(v) * float(u)
-                self._update_pbest(i, f)
+                self._update_pbest(i, f, uniq=u)
                 self._update_gbest(i, f, v, u)
+                if u < self.mode_collapse_u_thresh:        # v1.5(V8)
+                    self._collapse_flags[i] = True
                 self._log_eval(self._global_eval_cnt, 0, i, v, u, f,
                                alpha0, per_particle_elapsed)
                 self._global_eval_cnt += 1
@@ -598,8 +621,10 @@ class AESOQPSOOptimizer:
                 v, u = self.evaluate_fn(self.positions[i])
                 f    = float(v) * float(u)
                 elapsed = time.time() - t_i
-                self._update_pbest(i, f)
+                self._update_pbest(i, f, uniq=u)
                 self._update_gbest(i, f, v, u)
+                if u < self.mode_collapse_u_thresh:        # v1.5(V8)
+                    self._collapse_flags[i] = True
                 self._log_eval(self._global_eval_cnt, 0, i, v, u, f,
                                self._get_alpha(0), elapsed)
                 self._global_eval_cnt += 1
@@ -613,6 +638,23 @@ class AESOQPSOOptimizer:
         # ── 主迭代 ──────────────────────────────────────────────────────────
         for t in range(self.T):
             alpha = self._get_alpha(t)   # 每迭代一次（v1.2 已正確）
+
+            # ── v1.5(V8) 崩潰回收（mode collapse recycling）──────────────
+            # 於每個 t>0 迭代開頭，將上一輪標記為 collapse 的粒子位置重置至
+            # gbest 鄰域（±0.25 × 範圍），保留 pbest 個體記憶，flag 歸零。
+            if t > 0 and self.gbest_pos is not None:
+                flagged = np.nonzero(self._collapse_flags)[0]
+                if flagged.size > 0:
+                    for i in flagged:
+                        jitter = (self.rng.uniform(-0.25, 0.25, size=self.D)
+                                  * (self.ub - self.lb))
+                        self.positions[i] = self._clip(self.gbest_pos + jitter)
+                        self._collapse_flags[i] = False
+                        self._total_recycled += 1
+                    self.logger.info(
+                        f"  [崩潰回收] iter={t+1} 回收 {int(flagged.size)} 個粒子 "
+                        f"累計={self._total_recycled}"
+                    )
 
             # ── AE-QTS 有符號調和 mbest（v1.4 修正）──────────────────────
             mbest = self._ae_weighted_mbest()
@@ -645,8 +687,10 @@ class AESOQPSOOptimizer:
                 for i, (v, u) in enumerate(batch_results):
                     f = float(v) * float(u)
                     iter_fits.append(f)
-                    self._update_pbest(i, f)
+                    self._update_pbest(i, f, uniq=u)
                     self._update_gbest(i, f, v, u)
+                    if u < self.mode_collapse_u_thresh:    # v1.5(V8)
+                        self._collapse_flags[i] = True
                     self._log_eval(self._global_eval_cnt, t + 1, i, v, u, f,
                                    alpha, per_particle_elapsed)
                     self._global_eval_cnt += 1
@@ -657,8 +701,10 @@ class AESOQPSOOptimizer:
                     f    = float(v) * float(u)
                     elapsed = time.time() - t_i
                     iter_fits.append(f)
-                    self._update_pbest(i, f)
+                    self._update_pbest(i, f, uniq=u)
                     self._update_gbest(i, f, v, u)
+                    if u < self.mode_collapse_u_thresh:    # v1.5(V8)
+                        self._collapse_flags[i] = True
                     self._log_eval(self._global_eval_cnt, t + 1, i, v, u, f,
                                    alpha, elapsed)
                     self._global_eval_cnt += 1
@@ -713,6 +759,7 @@ class AESOQPSOOptimizer:
         self.logger.info(f"  Reinits                : {self._total_reinits}")
         self.logger.info(f"  Mutations              : {self._total_mutations}")
         self.logger.info(f"  Paired exploration     : {self._total_ae_updates} 次")
+        self.logger.info(f"  Mode-collapse recycled : {self._total_recycled} 次")
         self.logger.info(f"  OBL replacements       : {self._total_obl_replaced}")
         self.logger.info("=" * 70)
 

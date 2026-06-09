@@ -591,24 +591,74 @@ class DynamicCircuitBuilderCUDAQ:
 
     def apply_bond_disconnection_correction(self, bitstring: str) -> str:
         """
-        修正孤立重原子（存在但無鍵連接）的 bitstring。
+        修正孤立重原子（存在但無鍵連接）的 bitstring —— 價電子感知版（v9.2 / V8）。
         bitstring 順序與 _N9_ALL_REGS 一致（90 bits）。
 
-        對於 atom k（k=3..9），若 atom 存在但所有出鍵均為 0，
-        強制設最後一個鍵 bit 為 1（對應 bond_end-1），
-        即 '01' = SINGLE bond，確保分子連通性。
+        對於 atom k（k=3..n），若 atom 存在但所有出鍵均為 0（孤立），
+        v9.1 以前固定把「自己最後一個鍵位」設為 '01'（連到 atom k-1）。
+        v9.2 改為「價電子感知」：在所有既有原子 j (j<k) 中，挑選
+        「剩餘價數（valence margin = MAX_VALENCE - 目前總鍵級）最大且 > 0」者
+        建立單鍵 '01'，盡量避免製造超價（over-valent）的非法結構。
+        找不到任何 margin>0 的 j 時，fallback 回 v9.1 原行為（bond_end-1 設 '1'）。
+
+        bit 佈局（與 helper 對應）：
+          atom_type(k)  bits[(k-1)^2+(k-1)], bits[(k-1)^2+k]
+          bond(k->j)    bits[k^2-k+2+2*(j-1)], bits[k^2-k+3+2*(j-1)]   (k>j)
+          MAX_VALENCE   {0:無原子, 1:C=4, 2:O=2, 3:N=3}
         """
         if not self.remove_bond_disconnection:
             return bitstring
+
         n    = self.num_heavy_atom
         bits = list(bitstring)
+
+        MAX_VALENCE = {0: 0, 1: 4, 2: 2, 3: 3}
+
+        def atom_type(kk: int) -> int:
+            base = (kk - 1) ** 2 + (kk - 1)
+            return 2 * int(bits[base]) + int(bits[base + 1])
+
+        def bond_order(kk: int, jj: int) -> int:
+            # kk > jj：atom kk 的鍵暫存器中對應 j=jj 的 2 bits
+            base = kk * kk - kk + 2 + 2 * (jj - 1)
+            return 2 * int(bits[base]) + int(bits[base + 1])
+
+        def total_bond_order(kk: int) -> int:
+            s = 0
+            for jj in range(1, kk):              # kk -> jj   (jj < kk)
+                s += bond_order(kk, jj)
+            for ii in range(kk + 1, n + 1):      # ii -> kk   (ii > kk, atom 存在)
+                if atom_type(ii) != 0:
+                    s += bond_order(ii, kk)
+            return s
+
         for k in range(3, n + 1):
-            atom_start  = (k - 1) ** 2 + (k - 1)
-            atom_exists = bits[atom_start] == '1' or bits[atom_start + 1] == '1'
-            if not atom_exists:
+            # 1) atom 不存在 → 跳過
+            if atom_type(k) == 0:
                 continue
+
             bond_start = k * k - k + 2
             bond_end   = bond_start + 2 * (k - 1)
-            if all(b == '0' for b in bits[bond_start:bond_end]):
+
+            # 2) 該 atom 的鍵 bits 不全為 '0' → 已連接，跳過
+            if not all(b == '0' for b in bits[bond_start:bond_end]):
+                continue
+
+            # 3) 對所有 j < k 計算 valence margin，挑 margin 最大且 > 0 者
+            best_j      = -1
+            best_margin = 0
+            for j in range(k - 1, 0, -1):
+                margin = MAX_VALENCE[atom_type(j)] - total_bond_order(j)
+                if margin > best_margin:
+                    best_margin = margin
+                    best_j      = j
+
+            # 4) 建立單鍵 '01' 至 best_j；找不到則 fallback 原行為
+            if best_j != -1:
+                pos = bond_start + 2 * (best_j - 1)
+                bits[pos]     = '0'
+                bits[pos + 1] = '1'
+            else:
                 bits[bond_end - 1] = '1'
+
         return ''.join(bits)
