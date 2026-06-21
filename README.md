@@ -14,6 +14,7 @@ Surpass the Bayesian Optimization (BO) baseline reported in Chen et al. 2025
 ```
 Target metric : V × U (validity × uniqueness) > 0.8834
 Paper baseline: V = 0.955, U = 0.925, V × U = 0.8834  (num_sample = 5 000, ~355 BO evaluations)
+Achieved (V8) : V = 0.9594, U = 0.9704, V × U = 0.9310  (AE-SOQPSO, M=64, T=150 — +0.0476)
 ```
 
 The BO optimizer is replaced with a custom **AE-SOQPSO** (Adaptive Ensemble
@@ -25,16 +26,21 @@ Stochastic Optimal Quantum PSO), integrating three papers:
 | Xiao et al. 2026 (arXiv:2604.13877v1) | SQMG — TensorNet scalability reference |
 | Tseng et al. 2024 (arXiv:2311.12867v2) | AE-QTS — U-shaped harmonic weighting & paired update |
 
+> **Status — surpassed.** The latest completed run **V8** reaches gbest **V×U = 0.9310**
+> (V = 0.9594, U = 0.9704; V★ = 1.000, U★ = 0.9867), beating the BO baseline by **+0.0476**.
+
 ---
 
 ## Experiment History
 
-| Run | M | T | num_sample | Init | OBL | VU-dec | gbest V×U | Notes |
-|---|---|---|---|---|---|---|---|---|
-| V3 | 56 | 120 | 10 000 | random seed=42 | ✗ | ✗ | **0.8849** | Best so far; V★=1.000, U★=0.986 |
-| V4 | 56 | 200 | 10 000 | random seed=42 | ✗ | ✗ | 0.8720 | α_max=0.8 too restrictive |
-| V5 | 56 | 160 | 10 000 | random seed=17 | ✗ | ✗ | 0.8589 | Bad seed; stagnation never triggered |
-| **V6** | **64** | **120** | **5 000** | **Sobol** | **✓** | **✓** | TBD | Current run |
+| Run | M | T | num_sample | Init | OBL | VU-dec | AE-QTS | gbest V×U | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| V3 | 56 | 120 | 10 000 | random seed=42 | ✗ | ✗ | ✓ | 0.8849 | early best; num_sample=10k uniqueness bias |
+| V4 | 56 | 200 | 10 000 | random seed=42 | ✗ | ✗ | ✓ | 0.8720 | α_max=0.8 too restrictive |
+| V5 | 56 | 160 | 10 000 | random seed=17 | ✗ | ✗ | ✓ | 0.8589 | bad seed; stagnation never triggered |
+| V6 | 64 | 120 | 5 000 | Sobol | ✓ | ✓ | ✓ | 0.8462 | first Sobol+OBL+VU run; under baseline |
+| V7 | 64 | 120 | 5 000 | Sobol | ✓ | ✓ | ✓ | 0.8894 | signed-mbest fix; just above baseline |
+| **V8** | **64** | **150** | **5 000** | **Sobol** | **✓** | **✓** | **✓** | **0.9310** | **best: V=0.9594, U=0.9704, V★=1.000, U★=0.9867** |
 
 Key lessons learned:
 
@@ -117,22 +123,27 @@ python -c "from scipy.stats import qmc; print('scipy OK')"
 ```
 sqmg_project-cudaq/
 │
-├── run_qpso_qmg_cudaq.py      ← PRIMARY entry point  (v10.2, Sobol+OBL)
-├── qpso_optimizer_ae.py       ← AE-SOQPSO optimizer   (v1.2, OBL+VU-decouple)
+├── run_qpso_qmg_cudaq.py      ← PRIMARY entry point  (v10.3, Sobol+OBL+VU, T=150)
+├── qpso_optimizer_ae.py       ← AE-SOQPSO optimizer   (v1.5, signed-mbest + recycle)
 ├── worker_eval.py             ← Subprocess worker     (v10.2, tensornet blocked)
 ├── qpso_optimizer_qmg.py      ← Legacy SOQPSO         (reference only)
 ├── run_qpso_qmg_mpi.py        ← MPI fallback          (v1.3, deadlock fix)
 ├── cutn-qmg_mpi_8g.slurm      ← SLURM script          (v1.2, --gpu-bind fix)
+├── run_sweep.sh               ← Fig 3 particle-count sweep driver  (NEW)
 │
 ├── qmg/
 │   ├── __init__.py
 │   ├── generator_cudaq.py     ← MoleculeGeneratorCUDAQ  (v10.0)
 │   └── utils/
 │       ├── __init__.py
-│       ├── build_dynamic_circuit_cudaq.py  ← _qmg_n9 kernel  (v9.1, semicolon fix)
+│       ├── build_dynamic_circuit_cudaq.py  ← _qmg_n9 kernel  (v9.2, valence-aware bonds)
 │       ├── chemistry_data_processing.py    ← MoleculeQuantumStateGenerator
 │       ├── fitness_calculator.py           ← V/U scoring
 │       └── weight_generator.py             ← ConditionalWeightsGenerator
+│
+├── figures/
+│   ├── fig1_flowchart.py       ← Fig 1 method flowchart  (NEW)
+│   └── make_data_figures.py    ← Fig 2/3 generators from result CSVs  (NEW)
 │
 ├── docs/
 │   └── qmg-soqpso-handoff-2026-05-07.md  ← Full runbook
@@ -152,8 +163,8 @@ run_qpso_qmg_cudaq.py  (main process, stable RSS < 1 GB)
 │
 ├─ ConditionalWeightsGenerator          # generates / constrains 134 float weights
 │
-└─ AESOQPSOOptimizer (qpso_optimizer_ae.py v1.2)
-    │  M=64 particles, T=120 iterations, D=134 dimensions
+└─ AESOQPSOOptimizer (qpso_optimizer_ae.py v1.5)
+    │  M=64 particles, T=150 iterations, D=134 dimensions
     │  AE-QTS U-shaped harmonic mbest + V-U decoupled mbest
     │  OBL Phase 0 (doubles effective initial coverage)
     │  paired attractor update every pair_interval iterations
@@ -226,9 +237,15 @@ the AE pairing step.
 
 ---
 
-## v10.2 / v1.2 Changes (Current Version)
+## Version v10.3 / v1.5 / v9.2 Changes (V8 — current best)
 
-Four changes relative to the V3 run (v10.1 / v1.1):
+**V8 additions** (over V6/V7): `T` 120→150; `alpha_min` 0.40→0.30; `pair_interval` 5→4;
+AE-QTS **signed-harmonic mbest** sign-error fix (directional displacement 0.010→0.029);
+**mode-collapse recycling**; **adaptive V–U weighting** with tracking gates;
+**valence-aware bond-disconnection correction**. Result: gbest **V×U = 0.9310**
+(V8) vs 0.8462 (V6) / 0.8894 (V7).
+
+The four v10.2 building blocks below remain active, relative to the V3 run (v10.1 / v1.1):
 
 ### 1 — `num_sample = 5 000` (most impactful)
 
@@ -280,7 +297,7 @@ particles that never converge into a single high-V×U solution.
 | `num_heavy_atom` | 9 | 20-qubit circuit, 134 float params |
 | `num_sample` | 5000 | shots per `cudaq.sample()`; matches Chen 2025 |
 | `particles (M)` | 64 | `= 2^6` for Sobol uniformity guarantee |
-| `iterations (T)` | 120 | `total_evals ≈ 64 × 121 + 64 (OBL) = 7808` |
+| `iterations (T)` | 150 | `total_evals ≈ 64 × 151 + 64 (OBL) = 9728` |
 | `n_gpus` | 8 | subprocess pool width |
 | `alpha_max / min` | 1.2 / 0.4 | cosine annealing bounds |
 | `mutation_prob` | 0.15 | Cauchy heavy-tail mutation rate |
@@ -544,14 +561,52 @@ tail -f results_mpi_v12/unconditional_9_ae_mpi_v12.log
 |---|---|---|
 | `qpso_optimizer_ae.py` | v1.0 | Initial AE-SOQPSO |
 | `qpso_optimizer_ae.py` | v1.1 | Fix U-shaped weighting bug; fix paired-update Cauchy bug |
-| `qpso_optimizer_ae.py` | **v1.2** | **OBL Phase 0; V-U decoupled mbest** |
+| `qpso_optimizer_ae.py` | v1.2 | OBL Phase 0; V-U decoupled mbest |
+| `qpso_optimizer_ae.py` | **v1.5** | **V8: signed-harmonic mbest fix; mode-collapse recycle; adaptive V-U weight** |
 | `run_qpso_qmg_cudaq.py` | v9.6 | Subprocess isolation (memory leak fix) |
 | `run_qpso_qmg_cudaq.py` | v10.1 | Parallel 8-GPU subprocess pool (MPI abandoned) |
-| `run_qpso_qmg_cudaq.py` | **v10.2** | **num_sample=5000; Sobol init; OBL; VU-decouple flags** |
+| `run_qpso_qmg_cudaq.py` | v10.2 | num_sample=5000; Sobol init; OBL; VU-decouple flags |
+| `run_qpso_qmg_cudaq.py` | **v10.3** | **V8: T=150; alpha_min=0.30; pair_interval=4; V-U tracking gates** |
 | `worker_eval.py` | v10.2 | Remove tensornet from choices; default backend fix |
 | `qmg/generator_cudaq.py` | v10.0 | TensorNet backend stubs; malloc_trim |
 | `qmg/utils/build_dynamic_circuit_cudaq.py` | v9.1 | Semicolon AST fix; parametric kernel |
+| `qmg/utils/build_dynamic_circuit_cudaq.py` | **v9.2** | **V8: valence-aware bond-disconnection correction** |
 | `run_qpso_qmg_mpi.py` | v1.3 | Fix Barrier deadlock via MPI_FLAG_REBUILD |
+
+---
+
+## Paper Figures & Comparison Runs
+
+Three figures are produced for the paper (Fig. 4 GPU-scaling is intentionally
+omitted for now). Generators live in `figures/`.
+
+| Figure | Content | Generator | Data source |
+|---|---|---|---|
+| Fig 1 | Method flowchart (quantum-classical hybrid workflow) | `figures/fig1_flowchart.py` | none (design) |
+| Fig 2 | Optimizer comparison: BO baseline vs pure QPSO vs AE-QPSO | `figures/make_data_figures.py` | `results_v8/` + `results_qpso_pure/` |
+| Fig 3 | Particle-count sweet spot (final V×U vs M, with cost) | `figures/make_data_figures.py` | `results_v8/` + `results_sweep_M*/` |
+
+**Pure-QPSO ablation (Fig 2).** Here "QPSO" means the AE optimizer with *all
+AE-QTS removed* — standard QPSO mean-best `mbest = mean(pbest)`. Same circuit,
+Sobol init and parallel evaluation; only the amplitude-ensemble mechanism differs:
+
+```bash
+python run_qpso_qmg_cudaq.py --backend cudaq_nvidia --num_heavy_atom 9 \
+    --num_sample 5000 --particles 64 --iterations 150 \
+    --n_gpus 8 --gpu_ids 0,1,2,3,4,5,6,7 --subprocess_timeout 360 \
+    --sobol_init --no_obl --no_vu_decouple --no_ae_weighting --pair_interval 0 \
+    --seed 0 --task_name unconditional_9_qpso_pure_M64T150 --data_dir results_qpso_pure
+```
+
+**Particle-count sweep (Fig 3).** `run_sweep.sh` runs the full V8 method at
+`M = 16, 32, 48, 96, 128` (M=64 reuses `results_v8/`), each full length T=150,
+sequentially after the pure-QPSO run frees the GPUs.
+
+Regenerate both data-driven figures at any time:
+
+```bash
+cd figures && python make_data_figures.py     # reads result CSVs -> fig2/fig3 PNGs
+```
 
 ---
 
