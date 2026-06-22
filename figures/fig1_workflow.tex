@@ -3,120 +3,101 @@
 \usepackage{mathptmx}
 \usepackage{amsmath}
 \usepackage{tikz}
-\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc,decorations.pathreplacing}
 
+\definecolor{cInit}{HTML}{5B4FCF}\definecolor{cInitBg}{HTML}{EEECFB}
 \definecolor{cOpt}{HTML}{1F5FA6}\definecolor{cOptBg}{HTML}{EAF1FB}
 \definecolor{cQ}{HTML}{B5611F}\definecolor{cQBg}{HTML}{FBEEE0}
-\definecolor{cQmg}{HTML}{8E5A1F}\definecolor{cQmgBg}{HTML}{FFFFFF}
 \definecolor{cOut}{HTML}{1E7A45}\definecolor{cOutBg}{HTML}{E6F4EC}
-\definecolor{cInit}{HTML}{5B4FCF}\definecolor{cInitBg}{HTML}{EEECFB}
-\definecolor{cLoop}{HTML}{8E44AD}\definecolor{cInk}{HTML}{1B2631}\definecolor{cShad}{HTML}{D9C7A8}
+\definecolor{cLoop}{HTML}{8E44AD}\definecolor{cInk}{HTML}{1B2631}\definecolor{cGrey}{HTML}{6B7B8C}
 
 \begin{document}
 \begin{tikzpicture}[
   font=\small,
   >={Stealth[length=2.8mm]},
-  stageO/.style={rectangle, rounded corners=2pt, draw=cOpt, line width=0.8pt, fill=white,
-                 text=cInk, align=center, inner sep=6pt, text width=55mm, minimum height=14mm},
-  stageQ/.style={rectangle, rounded corners=2pt, draw=cQ, line width=0.8pt, fill=white,
-                 text=cInk, align=center, inner sep=6pt, text width=64mm, minimum height=13mm},
-  qmgb/.style={rectangle, rounded corners=2pt, draw=cQmg, line width=0.8pt, fill=white,
-               text=cInk, align=center, inner sep=6pt, text width=62mm, minimum height=13mm},
+  opt/.style={rectangle, rounded corners=2.5pt, draw=cOpt, line width=0.9pt, fill=cOptBg,
+              text=cInk, align=center, inner sep=6pt, text width=52mm, minimum height=15mm},
+  qmg/.style={rectangle, rounded corners=2.5pt, draw=cQ, line width=0.9pt, fill=cQBg,
+              text=cInk, align=center, inner sep=6pt, text width=56mm, minimum height=15mm},
   initb/.style={rectangle, rounded corners=3pt, draw=cInit, line width=1pt, fill=cInitBg,
-                text=cInk, align=center, inner sep=6pt, text width=32mm, minimum height=34mm},
-  outb/.style={rectangle, rounded corners=3pt, draw=cOut, line width=1pt, fill=cOutBg,
-               text=cInk, align=center, inner sep=6pt, text width=34mm, minimum height=34mm},
+                text=cInk, align=center, inner sep=6pt, text width=80mm, minimum height=12mm},
+  outb/.style={rectangle, rounded corners=3pt, draw=cOut, line width=1.1pt, fill=cOutBg,
+               text=cInk, align=center, inner sep=6pt, text width=40mm, minimum height=15mm},
   badge/.style={circle, draw=white, line width=0.6pt, fill=#1, text=white,
                 font=\footnotesize\bfseries, minimum size=5mm, inner sep=0pt},
   fwd/.style={->, line width=1.0pt, draw=cInk},
   loop/.style={->, line width=1.2pt, draw=cLoop},
   elab/.style={font=\footnotesize\itshape, text=cInk, fill=white, inner sep=2pt},
   llab/.style={font=\footnotesize\bfseries, text=cLoop, fill=white, inner sep=2pt},
-  phdr/.style={font=\footnotesize\bfseries},
+  grp/.style={font=\footnotesize\bfseries, text=#1},
 ]
 
-% ===================== Optimizer stages (steps 2-5) =====================
-\node[stageO] (o1) at (6.7,-1.9)
+% ---------------- Step 1: entry, top centre ----------------
+\node[initb] (s1) at (9.4,0.2)
+  {\textbf{Initialization} --- Sobol scrambled particles ($M=64$, $D=134$) $+$ OBL Phase 0 (opposition $x'=1-x$)};
+
+% ---------------- Optimizer column (left, steps 2-5) ----------------
+\node[opt] (s2) at (5.0,-3.7)
   {\textbf{Mean-best (mbest) update}\\ $\mathrm{mean}_i(\text{pbest}_i)$ $+$ AE-QTS U-shaped harmonic term $+$ V--U decoupled pull};
-\node[stageO,below=6mm of o1] (o2)
-  {\textbf{QPSO position update $+$ diversity}\\ $x_i=p_i\pm\alpha\,|m_b-x_i|\ln(1/u)$, $\alpha\!:\!1.2\!\to\!0.3$;\ Cauchy mutation;\ paired step};
-\node[stageO,below=6mm of o2] (o3)
-  {\textbf{Stagnation \& diversity control}\\ reinitialize 25\% worst particles after 12 stalls;\ mode-collapse recycling};
-\node[stageO,below=6mm of o3] (o4)
-  {\textbf{Chemistry constraint on weights}\\ \texttt{ConditionalWeightsGenerator} maps the 134 weights to a chemically valid encoding};
+\node[opt,below=8mm of s2] (s3)
+  {\textbf{QPSO position update}\\ $x_i=p_i\pm\alpha|m_b-x_i|\ln(1/u)$, $\alpha\!:\!1.2\!\to\!0.3$; Cauchy mutation; paired step};
+\node[opt,below=8mm of s3] (s4)
+  {\textbf{Stagnation \& diversity control}\\ reinit 25\% worst after 12 stalls; mode-collapse recycling};
+\node[opt,below=8mm of s4] (s5)
+  {\textbf{Chemistry constraint}\\ \texttt{ConditionalWeightsGenerator}\ \ $\to$ chemically valid 134-weight encoding};
 
-% ===================== Evaluation column (steps 6,7a-c,8) =====================
-\node[stageQ] (e1) at (15.5,-1.9)
-  {\textbf{Parallel dispatch}\\ $8\times$ V100, one subprocess per GPU; $\lceil M/8\rceil$ rounds per iteration ($M{=}64$ particles)};
-\node[qmgb,below=13mm of e1] (q1)
-  {\textbf{7a\ \ Build \& sample circuit}\\ the 134 weights parameterize a 20-qubit circuit (atom-type $+$ bond registers); \texttt{cudaq.sample} (5000 shots); 90 mid-circuit measurements steer later gates \emph{(dynamic circuit)}};
-\node[qmgb,below=6mm of q1] (q2)
-  {\textbf{7b\ \ Decode to molecules}\\ bitstrings $\to$ molecular graph (9 heavy atoms $\in\{$C,N,O$\}$ $+$ bonds) $\to$ canonical SMILES (RDKit) with valence-aware bond correction};
-\node[qmgb,below=6mm of q2] (q3)
-  {\textbf{7c\ \ Score generated set}\\ validity $V$ (valid SMILES fraction) $\times$ uniqueness $U$ (distinct valid) $=$ gated fitness $V\times U$};
-\node[stageQ,below=13mm of q3] (e3)
-  {\textbf{Memory-safe isolation}\\ subprocess exits $\Rightarrow$ CUDA context destroyed $\Rightarrow$ pinned memory released};
+% ---------------- QMG column (right, steps 6-9) ----------------
+\node[qmg] (s6) at (14.0,-3.7)
+  {\textbf{Parallel dispatch}\\ $8\times$ V100, one subprocess per GPU, $\lceil M/8\rceil$ rounds; on exit CUDA context $+$ pinned memory freed};
+\node[qmg,below=8mm of s6] (s7)
+  {\textbf{Build \& sample circuit}\\ weights parameterize a 20-qubit \emph{dynamic} circuit (atom $+$ bond registers); \texttt{cudaq.sample} 5000 shots; 90 mid-circuit measurements};
+\node[qmg,below=8mm of s7] (s8)
+  {\textbf{Decode to molecules}\\ bitstrings $\to$ graph (9 heavy atoms C/N/O $+$ bonds) $\to$ canonical SMILES (RDKit), valence-aware correction};
+\node[qmg,below=8mm of s8] (s9)
+  {\textbf{Evaluate fitness}\\ validity $V$ $\times$ uniqueness $U$ $=$ gated fitness $V\times U$};
 
-% ===================== Init & Output =====================
-\node[initb] (init) at (1.7,-6.0)
-  {\textbf{Initialization}\\[3pt] Sobol scrambled,\\ $M=64$, $D=134$\\[5pt] $+$ OBL Phase 0\\ (opposition\\ $x'\!=\!1\!-\!x$)};
-\node[outb] (out) at (21.5,-6.0)
-  {\textbf{Output}\\[3pt] g-best weight vector\\ $\to$ best molecules\\[6pt] \textbf{V8 result}\\ $V\times U=\mathbf{0.9310}$\\ ($V{=}0.9594$,\\ $U{=}0.9704$)};
+% ---------------- Output (bottom right) ----------------
+\node[outb] (out) at (14.0,-15.9)
+  {\textbf{Output} --- g-best weights $\to$ best molecules\\ (V8: $V\times U=\mathbf{0.9310}$, $V=0.9594$, $U=0.9704$)};
 
-% ===================== Panels & QMG sub-module =====================
-\coordinate (obot) at (o4.south|-e3.south);
-\begin{scope}[on background layer]
-  \node[rectangle, rounded corners=4pt, fill=cOptBg, draw=cOpt, line width=1.2pt,
-        fit=(o1)(o4)(obot), inner xsep=5mm, inner ysep=5mm] (panelO) {};
-  \node[rectangle, rounded corners=4pt, fill=cQBg, draw=cQ, line width=1.2pt,
-        fit=(e1)(q1)(q3)(e3), inner xsep=6mm, inner ysep=5mm] (panelQ) {};
-  % shadow (parallel replication hint) behind QMG module
-  \node[rectangle, rounded corners=3pt, fill=cShad, draw=cShad,
-        fit=(q1)(q3), inner xsep=3mm, inner ysep=3mm, xshift=1.6mm, yshift=-1.6mm] (qshad) {};
-  \node[rectangle, rounded corners=3pt, fill=white, draw=cQmg, line width=1pt, densely dashed,
-        fit=(q1)(q3), inner xsep=3mm, inner ysep=3mm] (qmod) {};
-\end{scope}
+% ---------------- phase group brackets ----------------
+\draw[decorate,decoration={brace,amplitude=5pt},draw=cOpt,line width=0.8pt]
+  ([xshift=-3mm]s2.north west) -- ([xshift=-3mm]s5.south west);
+\node[grp=cOpt,rotate=90] at ([xshift=-7mm]$(s2.north west)!0.5!(s5.south west)$) {Optimizer (AE-SOQPSO)};
+\draw[decorate,decoration={brace,amplitude=5pt,mirror},draw=cQ,line width=0.8pt]
+  ([xshift=3mm]s6.north east) -- ([xshift=3mm]s9.south east);
+\node[grp=cQ,rotate=-90] at ([xshift=7mm]$(s6.north east)!0.5!(s9.south east)$) {QMG generation \& evaluation};
 
-\node[phdr,text=cOpt,anchor=south west] at ([yshift=1.4mm]panelO.north west)
-  {Classical optimizer:\ AE-SOQPSO\ \ ($M{=}64$, $T{=}150$ iterations)};
-\node[phdr,text=cQ,anchor=south west] at ([yshift=1.4mm]panelQ.north west)
-  {Quantum molecular generation \& evaluation\ \ (8$\times$ V100 subprocess pool)};
-\node[font=\footnotesize\bfseries,text=cQmg,anchor=south west] at ([xshift=1mm,yshift=0.8mm]qmod.north west)
-  {QMG generator (per particle): 20-qubit chemistry-inspired dynamic circuit};
+% ---------------- step badges ----------------
+\node[badge=cInit] at (s1.north west) {1};
+\node[badge=cOpt]  at (s2.north west) {2};
+\node[badge=cOpt]  at (s3.north west) {3};
+\node[badge=cOpt]  at (s4.north west) {4};
+\node[badge=cOpt]  at (s5.north west) {5};
+\node[badge=cQ]    at (s6.north west) {6};
+\node[badge=cQ]    at (s7.north west) {7};
+\node[badge=cQ]    at (s8.north west) {8};
+\node[badge=cQ]    at (s9.north west) {9};
 
-% iteration label (top centre, clear band)
-\node[llab] at (11.1,0.55) {iteration loop\ \ $t=1,\ldots,T$\ \ ($T=150$)};
+% ---------------- forward arrows ----------------
+\draw[fwd] (s1.south) -- (9.4,-2.0) -- (5.0,-2.0) -- (s2.north);   % 1 -> 2
+\draw[fwd] (s2) -- (s3);
+\draw[fwd] (s3) -- (s4);
+\draw[fwd] (s4) -- (s5);
+% 5 -> 6 (weights), up the central gap into 6.west
+\draw[fwd] (s5.east) -- (9.6,-10.8) -- (9.6,-3.7)
+      node[elab,pos=0.62]{candidate weights $\{w_i\}$} -- (s6.west);
+\draw[fwd] (s6) -- (s7);
+\draw[fwd] (s7) -- (s8);
+\draw[fwd] (s8) -- (s9);
+% 9 -> output (t = T)
+\draw[fwd] (s9.south) -- (out.north) node[elab,pos=0.5]{$t=T$ (converged)};
 
-% ===================== Step badges =====================
-\node[badge=cInit] at (init.north west) {1};
-\node[badge=cOpt]  at (o1.north west) {2};
-\node[badge=cOpt]  at (o2.north west) {3};
-\node[badge=cOpt]  at (o3.north west) {4};
-\node[badge=cOpt]  at (o4.north west) {5};
-\node[badge=cQ]    at (e1.north west) {6};
-\node[badge=cQmg]  at (qmod.north east) {7};
-\node[badge=cQ]    at (e3.north west) {8};
-\node[badge=cOut]  at (out.north west) {9};
-
-% ===================== Internal arrows =====================
-\draw[fwd] (o1) -- (o2);
-\draw[fwd] (o2) -- (o3);
-\draw[fwd] (o3) -- (o4);
-\draw[fwd] (e1) -- (q1);
-\draw[fwd] (q1) -- (q2);
-\draw[fwd] (q2) -- (q3);
-\draw[fwd] (q3) -- (e3);
-
-% ===================== Macro flow =====================
-\draw[fwd] (init.east) -- (init.east-|panelO.west);
-\draw[fwd] (panelO.east) -- node[elab,above]{weights $\{w_i\}$} (panelQ.west);
-\draw[fwd] (panelQ.east) -- node[elab,above,align=center]{$t=T$\\(converged)} (out.west);
-
-% ===================== Feedback loop =====================
-\coordinate (rail) at (0,-13.0);
-\draw[loop] (panelQ.south) -- (panelQ.south|-rail)
-      -- node[llab,above]{fitness $V\times U$\ \ $\longrightarrow$\ \ update personal best (pbest) and global best (gbest)} (panelO.south|-rail)
-      -- (panelO.south);
+% ---------------- feedback loop: 9 -> 2 (bottom rail + far left) ----------------
+\coordinate (rail) at (0.7,-17.6);
+\draw[loop] (s9.east) -- (17.9,-10.8) -- (17.9,-17.6)
+      -- node[llab,below]{next iteration ($t<T$): update personal best (pbest) and global best (gbest)} (rail)
+      -- (0.7,-3.7) -- (s2.west);
 
 \end{tikzpicture}
 \end{document}
