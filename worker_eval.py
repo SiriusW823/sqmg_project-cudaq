@@ -57,6 +57,58 @@ SUPPORTED_BACKENDS = [
 ]
 
 
+# ===========================================================================
+# HBA / HBD 計測工具（v10.4 新增，純量測，不影響 V×U 最適化）
+# ===========================================================================
+#   目的：對齊 qiskit 參考 log（chemistry_constraint 4HBA/3HBD）的量測定義，
+#         在完全不改動 QPSO 演算法與 V×U 目標的前提下，額外回報生成分子群的
+#         平均 HBA（氫鍵受體數）與 HBD（氫鍵供體數）。
+#
+#   定義：使用 RDKit Lipinski.NumHAcceptors / NumHDonors，
+#         此為 QMG / Chen 等分子生成論文最常用的 HBA/HBD 定義。
+#         若參考實作使用 rdMolDescriptors.CalcNumHBA/CalcNumHBD，
+#         只需切換下方 _HBA_FN / _HBD_FN 兩行（見註解）。
+#
+#   統計基礎：對「有效分子」以出現次數加權求平均（distribution-learning 均值），
+#            與 validity / uniqueness 的採樣基礎一致，因此 qiskit log 的
+#            「HBA (close to 4)」/「HBD (close to 3)」語意可直接對比。
+# ===========================================================================
+
+def compute_mean_hba_hbd(smiles_dict: dict):
+    """
+    從 sample_molecule 回傳的 smiles_dict（{SMILES: count}）計算
+    加權平均 HBA / HBD（僅計入可解析的有效分子）。
+
+    回傳：(hba_mean, hbd_mean)；若無有效分子回傳 (0.0, 0.0)。
+    """
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import Lipinski
+    except ImportError:
+        return 0.0, 0.0
+
+    # ── HBA/HBD 定義（如需對齊其他參考實作，改這兩行即可）──
+    _HBA_FN = Lipinski.NumHAcceptors    # 或 rdMolDescriptors.CalcNumHBA
+    _HBD_FN = Lipinski.NumHDonors       # 或 rdMolDescriptors.CalcNumHBD
+
+    total = 0
+    hba_sum = 0.0
+    hbd_sum = 0.0
+    for smi, cnt in smiles_dict.items():
+        if smi is None or smi == "None":
+            continue
+        mol = Chem.MolFromSmiles(str(smi))
+        if mol is None:
+            continue
+        total += cnt
+        hba_sum += float(_HBA_FN(mol)) * cnt
+        hbd_sum += float(_HBD_FN(mol)) * cnt
+
+    if total == 0:
+        return 0.0, 0.0
+    return hba_sum / total, hbd_sum / total
+
+
 def main():
     p = argparse.ArgumentParser(description="QMG worker_eval (v10.2)")
     p.add_argument("--weight_path",    type=str, required=True)
@@ -66,10 +118,18 @@ def main():
     # ★ v10.2 修正：預設由 cudaq_tensornet 改為 cudaq_nvidia
     p.add_argument("--backend",        type=str, default="cudaq_nvidia",
                    choices=SUPPORTED_BACKENDS)
+    # ★ v10.4 新增：opt-in 的 HBA/HBD 量測旗標。
+    #   未指定時，行為與舊版完全相同（HBA/HBD 欄位輸出 0.0，不做 rdkit 計算，
+    #   不增加任何執行時間）。指定時才對 smiles_dict 計算平均 HBA/HBD。
+    p.add_argument("--report_hbahbd", action="store_true", default=False,
+                   help="額外計算並輸出生成分子群的平均 HBA / HBD（純量測，"
+                        "不影響 V×U 目標）。")
     args = p.parse_args()
 
     # 預設失敗輸出（確保 result_path 在任何錯誤情況下都存在）
-    np.save(args.result_path, np.array([0.0, 0.0], dtype=np.float64))
+    # ★ v10.4：欄位擴為 4 個 [validity, uniqueness, HBA, HBD]，向後相容
+    #   （父行程只讀取 arr[0], arr[1] 作為 (V, U)；arr[2], arr[3] 為量測欄位）。
+    np.save(args.result_path, np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64))
 
     try:
         from qmg.generator_cudaq import MoleculeGeneratorCUDAQ
@@ -96,9 +156,17 @@ def main():
             chemistry_constraint      = False,
         )
 
-        _, validity, uniqueness = gen.sample_molecule(args.num_sample)
+        smiles_dict, validity, uniqueness = gen.sample_molecule(args.num_sample)
 
-        np.save(args.result_path, np.array([validity, uniqueness], dtype=np.float64))
+        # ★ v10.4：opt-in HBA/HBD 量測（不影響 V×U 目標與 QPSO 演算法）
+        hba_mean, hbd_mean = (0.0, 0.0)
+        if args.report_hbahbd:
+            hba_mean, hbd_mean = compute_mean_hba_hbd(smiles_dict)
+
+        np.save(
+            args.result_path,
+            np.array([validity, uniqueness, hba_mean, hbd_mean], dtype=np.float64),
+        )
         sys.exit(0)
 
     except Exception as e:

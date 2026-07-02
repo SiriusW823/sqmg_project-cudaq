@@ -288,6 +288,17 @@ def parse_args() -> argparse.Namespace:
                    help="uniqueness 低於此值的粒子視為 mode collapse："
                         "不更新 pbest，並於下一迭代開頭重置至 gbest 鄰域")
 
+    # ── ★ v10.4 HBA/HBD 量測（opt-in，純記錄，不改變 V×U 最適化）──────────
+    #   對齊 qiskit 參考 log（chemistry_constraint 4HBA/3HBD）的量測。
+    #   兩者皆為 None 時功能關閉，執行流程與 v10.3 完全相同（向後相容）。
+    #   任一設定即開啟：worker 會計算平均 HBA/HBD，主行程逐迭代以
+    #   qiskit 相容格式記錄「最佳粒子」的 V×U / HBA / HBD，並另存 CSV。
+    #   ⚠ HBA/HBD 僅為量測指標，不進入 fitness、不改變 QPSO 演算法。
+    p.add_argument("--hba_target", type=float, default=None,
+                   help="HBA 量測目標（參考 log 為 4）。設定即開啟 HBA/HBD 量測記錄。")
+    p.add_argument("--hbd_target", type=float, default=None,
+                   help="HBD 量測目標（參考 log 為 3）。設定即開啟 HBA/HBD 量測記錄。")
+
     # ── 輸出設定 ──────────────────────────────────────────────────────────
     p.add_argument("--task_name", type=str,
                    default="unconditional_9_ae_v6_sobol_obl")
@@ -345,6 +356,109 @@ def log_gpu_info(logger: logging.Logger, gpu_ids: list) -> None:
 
 
 # ===========================================================================
+# ★ v10.4 新增：HBA/HBD 量測記錄器（純記錄，完全不觸碰 optimizer / V×U）
+# ===========================================================================
+
+class HBAHBDRecorder:
+    """
+    以 qiskit 參考 log 相容格式記錄每次評估批次的 HBA / HBD 量測。
+
+    設計原則（對應使用者需求「不更改架構，只加必要記錄」）：
+      - optimizer（qpso_optimizer_ae.py）完全不動；仍只收到 (V, U)。
+      - 本記錄器掛在評估函式（分子生成的唯一位置）之後，
+        利用 worker 額外回傳的 arr[2]=HBA、arr[3]=HBD 做記錄。
+      - 逐「批次」對齊 optimizer 的呼叫序列，還原 qiskit 的
+        「Iteration number: N」逐代編號：
+            batch mode + OBL : call0=Iter0, call1=OBL, call2..=Iter1..T
+            batch mode 無 OBL: call0=Iter0, call1..=Iter1..T
+      - 每代回報「該批次 V×U 最佳粒子」的 V×U / HBA / HBD（對應
+        qiskit 每代單一候選電路的量測），並另存逐代 CSV。
+
+    ⚠ HBA/HBD 不進入 fitness、不影響 QPSO 更新，僅供驗證用途。
+    """
+
+    def __init__(self, args, logger, obl_enabled: bool):
+        self.logger      = logger
+        self.hba_target  = args.hba_target
+        self.hbd_target  = args.hbd_target
+        self.obl_enabled = obl_enabled
+        self.call_idx    = 0
+        self.csv_path    = os.path.join(
+            args.data_dir, f"{args.task_name}_hbahbd.csv"
+        )
+        with open(self.csv_path, "w", encoding="utf-8") as f:
+            f.write(
+                "iter_label,phase,best_particle,"
+                "product_validity_uniqueness,HBA,HBD,"
+                "batch_mean_HBA,batch_mean_HBD\n"
+            )
+
+    def _hba_tag(self) -> str:
+        return f" (close to {self.hba_target:g})" if self.hba_target is not None else ""
+
+    def _hbd_tag(self) -> str:
+        return f" (close to {self.hbd_target:g})" if self.hbd_target is not None else ""
+
+    def report_batch(self, vu_list, hbahbd_list) -> None:
+        """
+        vu_list:     list[(v, u)]        —— 與傳給 optimizer 的內容一致
+        hbahbd_list: list[(hba, hbd)]    —— worker 回傳的量測欄位
+        """
+        idx = self.call_idx
+        self.call_idx += 1
+
+        # ── 還原 qiskit 逐代編號 ──
+        if idx == 0:
+            phase, iter_label = "phase0", 0
+        elif self.obl_enabled and idx == 1:
+            phase, iter_label = "obl", -1          # OBL 批次，不佔用迭代編號
+        else:
+            phase = "iter"
+            iter_label = idx - (1 if self.obl_enabled else 0)
+
+        M = len(vu_list)
+        if M == 0:
+            return
+
+        # ── 該批次 V×U 最佳粒子（對應 qiskit 每代單一候選）──
+        vu_scores = [float(v) * float(u) for (v, u) in vu_list]
+        best_i    = int(np.argmax(vu_scores))
+        best_vu   = vu_scores[best_i]
+        best_hba, best_hbd = hbahbd_list[best_i]
+
+        # ── 批次內有效粒子（HBA 或 HBD > 0）的平均，作為分布觀察值 ──
+        valid = [(h, d) for (h, d) in hbahbd_list if (h > 0 or d > 0)]
+        if valid:
+            mean_hba = sum(h for h, _ in valid) / len(valid)
+            mean_hbd = sum(d for _, d in valid) / len(valid)
+        else:
+            mean_hba, mean_hbd = 0.0, 0.0
+
+        # ── qiskit 相容格式輸出（best particle）──
+        if phase == "obl":
+            self.logger.info("[HBA/HBD 量測] OBL 批次（不計入迭代編號）")
+            self.logger.info(f"product_validity_uniqueness (maximize): {best_vu:.3f}")
+            self.logger.info(f"HBA{self._hba_tag()}: {best_hba:.3f}")
+            self.logger.info(f"HBD{self._hbd_tag()}: {best_hbd:.3f}")
+        else:
+            self.logger.info(f"[HBA/HBD 量測] Iteration number: {iter_label}")
+            self.logger.info(f"product_validity_uniqueness (maximize): {best_vu:.3f}")
+            self.logger.info(f"HBA{self._hba_tag()}: {best_hba:.3f}")
+            self.logger.info(f"HBD{self._hbd_tag()}: {best_hbd:.3f}")
+            self.logger.info(
+                f"  [批次分布] mean_HBA={mean_hba:.3f}  mean_HBD={mean_hbd:.3f}  "
+                f"(best particle #{best_i}, valid {len(valid)}/{M})"
+            )
+
+        with open(self.csv_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"{iter_label},{phase},{best_i},"
+                f"{best_vu:.6f},{best_hba:.4f},{best_hbd:.4f},"
+                f"{mean_hba:.4f},{mean_hbd:.4f}\n"
+            )
+
+
+# ===========================================================================
 # ★ v10.1 保留：parallel subprocess batch evaluate function
 # ===========================================================================
 
@@ -354,6 +468,7 @@ def make_parallel_batch_evaluate_fn(
     logger:        logging.Logger,
     worker_script: str,
     gpu_ids:       list,
+    recorder:      "HBAHBDRecorder" = None,   # ★ v10.4：None 時行為與舊版相同
 ) -> callable:
     """
     parallel subprocess 批次評估函式（v10.1 不變）。
@@ -368,9 +483,12 @@ def make_parallel_batch_evaluate_fn(
     pythonpath = os.environ.get("PYTHONPATH", ".")
     eval_count = [0]
 
+    report_on = recorder is not None            # ★ v10.4 HBA/HBD 量測開關
+
     def batch_evaluate_fn(positions: np.ndarray) -> list:
         M = positions.shape[0]
         results: list = [(0.0, 0.0)] * M
+        hbahbd: list  = [(0.0, 0.0)] * M         # ★ v10.4：與 results 平行的量測欄位
         t_batch_start = time.time()
 
         n_rounds = (M + n_gpus - 1) // n_gpus
@@ -406,6 +524,8 @@ def make_parallel_batch_evaluate_fn(
                     "--num_sample",     str(args.num_sample),
                     "--backend",        args.backend,
                 ]
+                if report_on:                    # ★ v10.4：僅在量測模式時計算 HBA/HBD
+                    cmd.append("--report_hbahbd")
 
                 proc = subprocess.Popen(
                     cmd,
@@ -425,6 +545,8 @@ def make_parallel_batch_evaluate_fn(
                     if proc.returncode == 0:
                         arr = np.load(rpath)
                         results[particle_idx] = (float(arr[0]), float(arr[1]))
+                        if report_on and len(arr) >= 4:   # ★ v10.4 量測欄位
+                            hbahbd[particle_idx] = (float(arr[2]), float(arr[3]))
                     else:
                         msg = stderr_bytes.decode("utf-8", errors="replace")[-400:]
                         logger.warning(
@@ -465,6 +587,13 @@ def make_parallel_batch_evaluate_fn(
                 f"本輪:{round_elapsed:.1f}s  "
                 f"累計:{time.time()-t_batch_start:.1f}s"
             )
+
+        # ★ v10.4：批次結束後記錄 HBA/HBD（不影響回傳給 optimizer 的 results）
+        if report_on:
+            try:
+                recorder.report_batch(results, hbahbd)
+            except Exception as e:
+                logger.warning(f"[HBA/HBD 量測] 記錄失敗（不影響最適化）：{e}")
 
         return results
 
@@ -631,11 +760,28 @@ def main() -> None:
     log_path = os.path.join(args.data_dir, f"{args.task_name}.log")
     logger   = setup_logger(log_path)
 
+    # ★ v10.4：HBA/HBD 量測開關（任一 target 設定即開啟；預設關閉＝完全向後相容）
+    report_hbahbd = (args.hba_target is not None) or (args.hbd_target is not None)
+
     # ── 基本資訊記錄 ─────────────────────────────────────────────────────
     logger.info(f"Task name: {args.task_name}")
-    logger.info(f"Task: ['validity', 'uniqueness']")
-    logger.info(f"Condition: ['None', 'None']")
-    logger.info(f"objective: ['maximize', 'maximize']")
+    if report_hbahbd:
+        # 對齊 qiskit 參考 log 的 chemistry_constraint 標頭格式，方便逐項對比。
+        # 注意：optimizer 目標仍僅為 product_validity_uniqueness（maximize）；
+        #       HBA/HBD 為 measure/report 欄位，不進入 fitness、不改變演算法。
+        hba_cond = "None" if args.hba_target is None else f"{args.hba_target:g}"
+        hbd_cond = "None" if args.hbd_target is None else f"{args.hbd_target:g}"
+        logger.info(f"Task: ['product_validity_uniqueness', 'HBA', 'HBD']")
+        logger.info(f"Condition: ['None', '{hba_cond}', '{hbd_cond}']")
+        logger.info(f"objective: ['maximize', 'measure', 'measure']")
+        logger.info(
+            "  ⚠ HBA/HBD 為量測/記錄欄位（非最適化目標）。"
+            "QPSO 目標與 v10.3 完全相同：maximize V×U。"
+        )
+    else:
+        logger.info(f"Task: ['validity', 'uniqueness']")
+        logger.info(f"Condition: ['None', 'None']")
+        logger.info(f"objective: ['maximize', 'maximize']")
     logger.info(f"# of heavy atoms: {args.num_heavy_atom}")
     logger.info(f"# of samples: {args.num_sample}  "
                 f"(v10.2 預設 5000，與 Chen 2025 對齊，birthday paradox 修正)")
@@ -720,10 +866,20 @@ def main() -> None:
         logger.info(f"[v10.3] 使用 單GPU 序列模式（GPU {gpu_ids[0]}）")
     else:
         evaluate_fn       = None
+        # ★ v10.4：僅在量測模式（8-GPU 並行）建立 HBA/HBD 記錄器
+        recorder = None
+        if report_hbahbd:
+            recorder = HBAHBDRecorder(args, logger, obl_enabled=args.obl)
+            logger.info(
+                f"[v10.4] HBA/HBD 量測記錄：✓ 開啟  "
+                f"(HBA target={args.hba_target}, HBD target={args.hbd_target})  "
+                f"CSV={recorder.csv_path}"
+            )
         batch_evaluate_fn = make_parallel_batch_evaluate_fn(
             args=args, cwg=cwg, logger=logger,
             worker_script=worker_script,
             gpu_ids=gpu_ids,
+            recorder=recorder,
         )
         logger.info(
             f"[v10.3] 使用 {effective_n_gpus}-GPU 並行模式  GPU IDs: {gpu_ids}"
