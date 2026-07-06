@@ -125,6 +125,9 @@ class AESOQPSOOptimizer:
         logger:              logging.Logger,
         evaluate_fn:         Optional[Callable[[np.ndarray], Tuple[float, float]]] = None,
         batch_evaluate_fn:   Optional[Callable[[np.ndarray], List[Tuple[float, float]]]] = None,
+        fitness_fn:          Optional[Callable[[Tuple[float, ...]], float]] = None,
+        objective_label:     str   = "V×U",
+        compare_bo_baseline: bool  = True,
         seed:                int   = 42,
         alpha_max:           float = 1.2,
         alpha_min:           float = 0.3,   # v1.5(V8): 0.40 → 0.30
@@ -157,6 +160,9 @@ class AESOQPSOOptimizer:
         self.logger            = logger
         self.evaluate_fn       = evaluate_fn
         self.batch_evaluate_fn = batch_evaluate_fn
+        self.fitness_fn        = fitness_fn
+        self.objective_label   = objective_label
+        self.compare_bo_baseline = compare_bo_baseline
         self.alpha_max         = alpha_max
         self.alpha_min         = alpha_min
         self.data_dir          = data_dir
@@ -227,6 +233,28 @@ class AESOQPSOOptimizer:
     def _rand_pos(self, n: int) -> np.ndarray:
         return self.lb + self.rng.random((n, self.D)) * (self.ub - self.lb)
 
+    def _as_metrics(self, result) -> Tuple[float, ...]:
+        """
+        Normalize evaluator output.
+
+        Backward-compatible default: existing evaluators return (V, U).
+        Opt-in multi-objective runners may return extra metrics such as
+        (V, U, HBA, HBD); the optimizer still tracks V/U from the first two
+        values while fitness_fn can consume the full tuple.
+        """
+        try:
+            metrics = tuple(float(x) for x in result)
+        except TypeError:
+            metrics = (float(result), 0.0)
+        if len(metrics) < 2:
+            metrics = metrics + (0.0,) * (2 - len(metrics))
+        return metrics
+
+    def _fitness_from_metrics(self, metrics: Tuple[float, ...]) -> float:
+        if self.fitness_fn is None:
+            return float(metrics[0]) * float(metrics[1])
+        return float(self.fitness_fn(metrics))
+
     def _clip(self, x: np.ndarray) -> np.ndarray:
         return np.clip(x, self.lb, self.ub)
 
@@ -286,8 +314,10 @@ class AESOQPSOOptimizer:
         per_particle_elapsed = elapsed_obl / max(self.M, 1)
 
         n_replaced = 0
-        for i, (v, u) in enumerate(obl_results):
-            f_obl = float(v) * float(u)
+        for i, raw_result in enumerate(obl_results):
+            metrics = self._as_metrics(raw_result)
+            v, u = metrics[0], metrics[1]
+            f_obl = self._fitness_from_metrics(metrics)
             self._log_eval(
                 self._global_eval_cnt, 0, self.M + i,
                 v, u, f_obl, alpha0, per_particle_elapsed
@@ -491,8 +521,9 @@ class AESOQPSOOptimizer:
             self.gbest_val  = val
             self.gbest_uniq = uniq
             self.logger.info(
-                f"  🔥 New gbest!  V={val:.4f}  U={uniq:.4f}  V×U={fit:.4f}"
-                f"{'  ✓ 超越 BO 基線 0.8834!' if fit > 0.8834 else ''}"
+                f"  🔥 New gbest!  V={val:.4f}  U={uniq:.4f}  "
+                f"{self.objective_label}={fit:.4f}"
+                f"{'  ✓ 超越 BO 基線 0.8834!' if (self.compare_bo_baseline and fit > 0.8834) else ''}"
             )
 
         if val > self._best_v_ever:
@@ -606,7 +637,9 @@ class AESOQPSOOptimizer:
         )
         self.logger.info(f"  停滯門檻               : {self.stagnation_limit} iters")
         self.logger.info(f"  Cauchy 變異機率         : {self.mutation_prob:.0%}")
-        self.logger.info(f"  BO 基準（Chen 2025）   : 0.8834（V=0.955, U=0.925, N=9, 5000 shots）")
+        self.logger.info(f"  Objective              : {self.objective_label}")
+        if self.compare_bo_baseline:
+            self.logger.info(f"  BO 基準（Chen 2025）   : 0.8834（V=0.955, U=0.925, N=9, 5000 shots）")
         self.logger.info("=" * 70)
 
         # ── Phase 0 ────────────────────────────────────────────────────────
@@ -619,8 +652,10 @@ class AESOQPSOOptimizer:
             # v1.3 BUG-FIX 2：在迴圈外計算一次 alpha0
             alpha0               = self._get_alpha(0)
             per_particle_elapsed = elapsed_batch / max(self.M, 1)
-            for i, (v, u) in enumerate(batch_results):
-                f = float(v) * float(u)
+            for i, raw_result in enumerate(batch_results):
+                metrics = self._as_metrics(raw_result)
+                v, u = metrics[0], metrics[1]
+                f = self._fitness_from_metrics(metrics)
                 self._update_pbest(i, f, uniq=u)
                 self._update_gbest(i, f, v, u)
                 if u < self.mode_collapse_u_thresh:        # v1.5(V8)
@@ -631,8 +666,9 @@ class AESOQPSOOptimizer:
         else:
             for i in range(self.M):
                 t_i = time.time()
-                v, u = self.evaluate_fn(self.positions[i])
-                f    = float(v) * float(u)
+                metrics = self._as_metrics(self.evaluate_fn(self.positions[i]))
+                v, u = metrics[0], metrics[1]
+                f = self._fitness_from_metrics(metrics)
                 elapsed = time.time() - t_i
                 self._update_pbest(i, f, uniq=u)
                 self._update_gbest(i, f, v, u)
@@ -697,8 +733,10 @@ class AESOQPSOOptimizer:
                 batch_results = self.batch_evaluate_fn(self.positions)
                 elapsed_batch = time.time() - t_iter
                 per_particle_elapsed = elapsed_batch / max(self.M, 1)
-                for i, (v, u) in enumerate(batch_results):
-                    f = float(v) * float(u)
+                for i, raw_result in enumerate(batch_results):
+                    metrics = self._as_metrics(raw_result)
+                    v, u = metrics[0], metrics[1]
+                    f = self._fitness_from_metrics(metrics)
                     iter_fits.append(f)
                     self._update_pbest(i, f, uniq=u)
                     self._update_gbest(i, f, v, u)
@@ -710,8 +748,9 @@ class AESOQPSOOptimizer:
             else:
                 for i in range(self.M):
                     t_i = time.time()
-                    v, u = self.evaluate_fn(self.positions[i])
-                    f    = float(v) * float(u)
+                    metrics = self._as_metrics(self.evaluate_fn(self.positions[i]))
+                    v, u = metrics[0], metrics[1]
+                    f = self._fitness_from_metrics(metrics)
                     elapsed = time.time() - t_i
                     iter_fits.append(f)
                     self._update_pbest(i, f, uniq=u)
@@ -754,7 +793,7 @@ class AESOQPSOOptimizer:
         # ── 最終摘要 ────────────────────────────────────────────────────────
         self.logger.info("=" * 70)
         self.logger.info("AE-SOQPSO 優化完成（v1.5/V8）")
-        self.logger.info(f"  Best V×U                : {self.gbest_fit:.6f}")
+        self.logger.info(f"  Best {self.objective_label:<18}: {self.gbest_fit:.6f}")
         self.logger.info(f"  Best V                  : {self.gbest_val:.4f}")
         self.logger.info(f"  Best U                  : {self.gbest_uniq:.4f}")
         self.logger.info(f"  V⋆(raw, 含退化解)        : {self._best_v_ever:.4f}")
@@ -763,11 +802,12 @@ class AESOQPSOOptimizer:
                          f"{self._best_qualified_v_val:.4f}  (mbest 吸引子 V★)")
         self.logger.info(f"  U✦(gate≥{self.min_v_for_u_track:.1f})          : "
                          f"{self._best_qualified_u_val:.4f}  (mbest 吸引子 U★)")
-        self.logger.info(
-            f"  BO Baseline            : 0.8834  "
-            + ("✓ 超越！" if self.gbest_fit > 0.8834
-               else f"✗ 差距 {0.8834 - self.gbest_fit:.4f}")
-        )
+        if self.compare_bo_baseline:
+            self.logger.info(
+                f"  BO Baseline            : 0.8834  "
+                + ("✓ 超越！" if self.gbest_fit > 0.8834
+                   else f"✗ 差距 {0.8834 - self.gbest_fit:.4f}")
+            )
         self.logger.info(f"  Total evals            : {self._global_eval_cnt}")
         self.logger.info(f"  Reinits                : {self._total_reinits}")
         self.logger.info(f"  Mutations              : {self._total_mutations}")
