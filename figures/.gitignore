@@ -1,5 +1,6 @@
 # Ignore generated PNGs by default, but keep the paper figures
 *.png
 !fig1_workflow.png
-!fig3_sweep_table.png
-!fig4_gpu_scaling.png
+!fig2_VU_bars.png
+!fig3_convergence.png
+!fig4_hbahbd_compare.png

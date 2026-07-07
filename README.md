@@ -1,7 +1,7 @@
 # sqmg_project-cudaq
 
 CUDA-Q 0.7.1 implementation of QMG (Quantum Molecular Generation) with
-AE-SOQPSO optimization, targeting 9-heavy-atom molecule generation on
+AE-QPSO optimization, targeting 9-heavy-atom molecule generation on
 NCHC DGX111 V100 GPUs.
 
 ---
@@ -14,10 +14,10 @@ Surpass the Bayesian Optimization (BO) baseline reported in Chen et al. 2025
 ```
 Target metric : V × U (validity × uniqueness) > 0.8834
 Paper baseline: V = 0.955, U = 0.925, V × U = 0.8834  (num_sample = 5 000, ~355 BO evaluations)
-Achieved (V8) : V = 0.9594, U = 0.9704, V × U = 0.9310  (AE-SOQPSO, M=64, T=150 — +0.0476)
+Achieved (V8) : V = 0.9594, U = 0.9704, V × U = 0.9310  (AE-QPSO, M=64, T=150 — +0.0476)
 ```
 
-The BO optimizer is replaced with a custom **AE-SOQPSO** (Adaptive Ensemble
+The BO optimizer is replaced with a custom **AE-QPSO** (Adaptive Ensemble
 Stochastic Optimal Quantum PSO), integrating three papers:
 
 | Paper | Role |
@@ -29,13 +29,15 @@ Stochastic Optimal Quantum PSO), integrating three papers:
 > **Status — surpassed.** The latest completed run **V8** reaches gbest **V×U = 0.9310**
 > (V = 0.9594, U = 0.9704; V★ = 1.000, U★ = 0.9867), beating the BO baseline by **+0.0476**.
 >
-> **Current work (v10.4, in progress).** An opt-in, *measure-only* HBA/HBD channel
-> (H-bond acceptors / donors) has been added to test whether the same architecture
-> that maximizes V×U also produces chemically sensible molecules. The optimizer is
-> **unchanged** — it still maximizes V×U only; HBA/HBD are measured and logged per
-> iteration for comparison against an external reference run. Two M=128 comparison
-> runs are currently executing on DGX111 — final results and logs will be added when
-> they complete. See [HBA/HBD Conditional Comparison](#hbahbd-conditional-comparison-v104--in-progress).
+> **Best unconditional result.** Scaling the full method to **M=128** reaches
+> **V×U = 0.9420** (V = 0.975, U = 0.966), beating the BO baseline (0.8834) by **+0.0586**.
+>
+> **Current work — HBA/HBD generation.** The pipeline now supports two H-bond
+> (HBA/HBD) modes: (i) an opt-in *measure-only* channel that records mean HBA/HBD
+> without changing the objective, and (ii) a *multi-objective* runner that folds
+> HBA/HBD into the fitness. Multi-objective runs for M=16/32/64/128 (target HBA=4,
+> HBD=3, 10 000 shots, T=150) are executing across DGX nodes dgx101/104/105/107.
+> See [HBA/HBD Generation](#hbahbd-generation).
 
 ---
 
@@ -132,13 +134,15 @@ python -c "from scipy.stats import qmc; print('scipy OK')"
 sqmg_project-cudaq/
 │
 ├── run_qpso_qmg_cudaq.py      ← PRIMARY entry point  (v10.4, +opt-in HBA/HBD measure-only)
-├── qpso_optimizer_ae.py       ← AE-SOQPSO optimizer   (v1.5, signed-mbest + recycle)
+├── qpso_optimizer_ae.py       ← AE-QPSO optimizer   (v1.5, signed-mbest + recycle)
 ├── worker_eval.py             ← Subprocess worker     (v10.2, tensornet blocked)
 ├── qpso_optimizer_qmg.py      ← Legacy SOQPSO         (reference only)
 ├── run_qpso_qmg_mpi.py        ← MPI fallback          (v1.3, deadlock fix)
 ├── cutn-qmg_mpi_8g.slurm      ← SLURM script          (v1.2, --gpu-bind fix)
 ├── run_sweep.sh               ← Fig 3 particle-count sweep driver
-├── run_m128_hbahbd.sh         ← M=128 HBA/HBD comparison launcher  (v10.4, NEW)
+├── run_m128_hbahbd.sh         ← M=128 HBA/HBD measure-only launcher  (v10.4)
+├── run_qpso_qmg_cudaq_hbahbd_multiobj.py ← HBA/HBD MULTI-OBJECTIVE runner  (NEW)
+├── run_hbahbd_multiobj.sh     ← multi-objective launcher: `bash run_hbahbd_multiobj.sh <M>`  (NEW)
 │
 ├── qmg/
 │   ├── __init__.py
@@ -153,12 +157,12 @@ sqmg_project-cudaq/
 ├── figures/
 │   ├── fig1_flowchart.py       ← Fig 1 method flowchart generator
 │   ├── fig1_workflow.tex       ← Fig 1 LaTeX/TikZ source
-│   ├── make_fig23.py           ← Fig 2/3 generators (current, log-based V/U)
-│   ├── make_data_figures.py    ← Fig 2/3 generators (legacy)
-│   ├── fig1_workflow.png/.pdf  ← Fig 1 (method workflow)
-│   ├── fig2_VU_bars.jpg        ← Fig 2 (optimizer comparison)
-│   ├── fig3_sweep_table.png    ← Fig 3 (particle-count sweep + resource table)
-│   └── fig4_gpu_scaling.png    ← Fig 4 (GPU-scaling estimate from M=128)
+│   ├── make_figs_v2.py         ← Fig 2/3 generators (on DGX; reads result CSVs)
+│   ├── make_fig4.py            ← Fig 4 generator (HBA/HBD vs reference)
+│   ├── fig1_workflow.png/.pdf  ← Fig 1 (method workflow, horizontal)
+│   ├── fig2_VU_bars.png/.pdf   ← Fig 2 (optimizer ablation)
+│   ├── fig3_convergence.png/.pdf ← Fig 3 (convergence vs particle count)
+│   └── fig4_hbahbd_compare.png/.pdf ← Fig 4 (HBA/HBD vs reference)
 │
 ├── docs/
 │   ├── qmg-soqpso-handoff-2026-05-07.md   ← Full runbook
@@ -233,7 +237,7 @@ one GPU regardless of cgroup policy. When the child exits after a single
 `cudaq.sample()`, the CUDA driver destroys the context and reclaims all
 pinned memory. Peak concurrent pinned memory is bounded to 8 × 2.5 GB = 20 GB.
 
-### AE-SOQPSO Algorithm
+### AE-QPSO Algorithm
 
 **v1.1 bug corrections** (verified against arXiv:2311.12867v2):
 
@@ -575,7 +579,7 @@ tail -f results_mpi_v12/unconditional_9_ae_mpi_v12.log
 
 | File | Version | Key changes |
 |---|---|---|
-| `qpso_optimizer_ae.py` | v1.0 | Initial AE-SOQPSO |
+| `qpso_optimizer_ae.py` | v1.0 | Initial AE-QPSO |
 | `qpso_optimizer_ae.py` | v1.1 | Fix U-shaped weighting bug; fix paired-update Cauchy bug |
 | `qpso_optimizer_ae.py` | v1.2 | OBL Phase 0; V-U decoupled mbest |
 | `qpso_optimizer_ae.py` | **v1.5** | **V8: signed-harmonic mbest fix; mode-collapse recycle; adaptive V-U weight** |
@@ -584,6 +588,7 @@ tail -f results_mpi_v12/unconditional_9_ae_mpi_v12.log
 | `run_qpso_qmg_cudaq.py` | v10.2 | num_sample=5000; Sobol init; OBL; VU-decouple flags |
 | `run_qpso_qmg_cudaq.py` | **v10.3** | **V8: T=150; alpha_min=0.30; pair_interval=4; V-U tracking gates** |
 | `run_qpso_qmg_cudaq.py` | **v10.4** | **Opt-in HBA/HBD measure-only: `--hba_target`/`--hbd_target`, HBAHBDRecorder, reference-format log (optimization path unchanged)** |
+| `run_qpso_qmg_cudaq_hbahbd_multiobj.py` | **NEW** | **HBA/HBD multi-objective: fitness `(V×U)·((1−w)+w·chem_closeness)`, `chem_closeness=exp(−½((|HBA−4|/σ)²+(|HBD−3|/σ)²))`; flags `--chem_weight`,`--hba_sigma`,`--hbd_sigma`** |
 | `worker_eval.py` | v10.2 | Remove tensornet from choices; default backend fix |
 | `worker_eval.py` | **v10.4** | **`compute_mean_hba_hbd()` (RDKit Lipinski); returns `[V,U,HBA,HBD]` (parent still reads V,U — backward compatible)** |
 | `qmg/generator_cudaq.py` | v10.0 | TensorNet backend stubs; malloc_trim |
@@ -599,22 +604,22 @@ Four figures are produced for the paper. Generators and rendered figures live in
 
 | Figure | Content | Generator | Data source |
 |---|---|---|---|
-| Fig 1 | Method flowchart (quantum-classical hybrid workflow) | `figures/fig1_flowchart.py` / `fig1_workflow.tex` | none (design) |
-| Fig 2 | Optimizer comparison: BO baseline vs pure QPSO vs AE-QPSO | `figures/make_fig23.py` | `results_v8/` + `results_qpso_pure/` |
-| Fig 3 | Particle-count sweet spot (final V×U vs M) + circuit-resource table | `figures/make_fig23.py` | `results_v8/` + `results_sweep_M*/` |
-| Fig 4 | GPU-scaling estimate extrapolated from the measured M=128 run | `figures/fig4_estimate.py` (on DGX) | `results_v8/` timing |
+| Fig 1 | Method workflow (horizontal, quantum–classical hybrid) | `figures/fig1_workflow.tex` | none (design) |
+| Fig 2 | Optimizer ablation (BO / pure QPSO / +Sobol / AE-QPSO), V and U | `figures/make_figs_v2.py` | `results_qpso_nosobol/`, `results_qpso_pure/`, `results_v8/` |
+| Fig 3 | Convergence of best V×U vs iteration for M=16…128 | `figures/make_figs_v2.py` | `results_sweep_M*/` + `results_v8/` |
+| Fig 4 | Conditional HBA/HBD vs reference: V×U, HBA, HBD per iteration | `figures/make_fig4.py` | `results_hbahbd/` + reference log |
 
 ### Fig 1 — Method Workflow
 ![Fig 1 — method workflow](figures/fig1_workflow.png)
 
-### Fig 2 — Optimizer Comparison
-![Fig 2 — optimizer comparison](figures/fig2_VU_bars.jpg)
+### Fig 2 — Optimizer Ablation
+![Fig 2 — optimizer ablation](figures/fig2_VU_bars.png)
 
-### Fig 3 — Particle-count Sweep + Resource Table
-![Fig 3 — particle-count sweep](figures/fig3_sweep_table.png)
+### Fig 3 — Convergence vs Particle Count
+![Fig 3 — convergence](figures/fig3_convergence.png)
 
-### Fig 4 — GPU-scaling Estimate
-![Fig 4 — GPU scaling](figures/fig4_gpu_scaling.png)
+### Fig 4 — Conditional HBA/HBD vs Reference
+![Fig 4 — HBA/HBD comparison](figures/fig4_hbahbd_compare.png)
 
 **Pure-QPSO ablation (Fig 2).** Here "QPSO" means the AE optimizer with *all
 AE-QTS removed* — standard QPSO mean-best `mbest = mean(pbest)`. Same circuit,
@@ -632,59 +637,60 @@ python run_qpso_qmg_cudaq.py --backend cudaq_nvidia --num_heavy_atom 9 \
 `M = 16, 32, 48, 96, 128` (M=64 reuses `results_v8/`), each full length T=150,
 sequentially after the pure-QPSO run frees the GPUs.
 
-Regenerate the data-driven figures at any time:
+Regenerate the data-driven figures (on DGX, reading result CSVs):
 
 ```bash
-cd figures && python make_fig23.py     # reads result CSVs -> fig2/fig3 PNGs
+python figures/make_figs_v2.py         # -> fig2_VU_bars + fig3_convergence
+python figures/make_fig4.py            # -> fig4_hbahbd_compare (needs the reference log)
 ```
 
 ---
 
-## HBA/HBD Conditional Comparison (v10.4 — in progress)
+## HBA/HBD Generation
 
-**Goal.** Verify that the AE-SOQPSO architecture, while maximizing V×U, *also*
-generates molecules whose mean H-bond acceptor (HBA) and donor (HBD) counts land
-near chemically meaningful targets — compared against an external reference run
-(`chemistry_constraint_qiskit_4HBA_3HBD_0.log`, a different optimizer/codebase
-targeting HBA=4, HBD=3 with V×U ≈ 0.60, num_sample = 10 000).
+Two H-bond (HBA/HBD) modes are provided, both benchmarked against an external
+reference run (`chemistry_constraint_qiskit_4HBA_3HBD_0.log`, a different
+optimizer/codebase targeting HBA=4, HBD=3 at 10\,000 shots, reaching V×U ≈ 0.60).
 
-**Design — measure-only, opt-in, fully backward-compatible.** The optimizer is
-untouched: QPSO still maximizes V×U only. v10.4 adds two things:
+### Mode 1 — measure-only (v10.4)
 
-- `worker_eval.py` — `compute_mean_hba_hbd()` uses RDKit
-  `Lipinski.NumHAcceptors` / `NumHDonors`, frequency-weighted over generated
-  valid molecules; the worker now returns `[V, U, HBA, HBD]` (parent still reads
-  `arr[0], arr[1]` as V, U, so the optimization path is byte-for-byte identical).
-- `run_qpso_qmg_cudaq.py` — new `--hba_target` / `--hbd_target` flags (default
-  `None` = off, i.e. identical to v10.3). When set, an `HBAHBDRecorder` logs the
-  best-V×U particle's V×U / HBA / HBD per iteration and writes a
-  `{task}_hbahbd.csv`, with a reference-style log header
-  (`Task: ['product_validity_uniqueness', 'HBA', 'HBD']`,
-  `Condition: ['None', '4', '3']`, `objective: ['maximize', 'measure', 'measure']`).
-
-Nothing in `qpso_optimizer_ae.py` changes. Full details:
+The optimizer objective is unchanged (it still maximizes V×U); HBA/HBD are only
+measured and logged. `worker_eval.py` adds `compute_mean_hba_hbd()` (RDKit
+`Lipinski.NumHAcceptors` / `NumHDonors`, frequency-weighted) and returns
+`[V, U, HBA, HBD]`; `run_qpso_qmg_cudaq.py` gains `--hba_target` / `--hbd_target`
+(default off) plus an `HBAHBDRecorder` that writes `{task}_hbahbd.csv`. Launch with
+`run_m128_hbahbd.sh`. Details:
 [docs/hbahbd_measurement_v10.4_handoff.md](docs/hbahbd_measurement_v10.4_handoff.md).
 
-**Runs (executing on DGX111, tmux, 4+4 GPU split to avoid contention).**
+### Mode 2 — multi-objective (current)
 
-| Run | shots | M | T | GPUs | HBA/HBD target | est. wall |
-|---|---|---|---|---|---|---|
-| `m128_s10000` | 10 000 (matches reference) | 128 | 150 | 0–3 | 4 / 3 | ~16 days |
-| `m128_s5000` | 5 000 (V8 default) | 128 | 150 | 4–7 | 4 / 3 | ~8 days |
+`run_qpso_qmg_cudaq_hbahbd_multiobj.py` folds HBA/HBD into the fitness that the
+optimizer maximizes:
 
-Launch (see `run_m128_hbahbd.sh` for the single-run 8-GPU variant):
-
-```bash
-tmux new -s m128_s10000
-python run_qpso_qmg_cudaq.py --particles 128 --iterations 150 --num_heavy_atom 9 \
-    --num_sample 10000 --n_gpus 4 --gpu_ids 0,1,2,3 --backend cudaq_nvidia \
-    --hba_target 4 --hbd_target 3 --subprocess_timeout 900 \
-    --task_name chemistry_constraint_cudaq_4HBA_3HBD_M128_s10000 --data_dir results_hbahbd
+```
+objective       = (V × U) · [ (1 − w) + w · chem_closeness ]
+chem_closeness  = exp( −½ · ( (|HBA − 4| / σ_HBA)² + (|HBD − 3| / σ_HBD)² ) )
 ```
 
-Outputs (gitignored; live on DGX under `results_hbahbd/`, final logs added here on
-completion): `{task}.log` (reference-format), `{task}.csv` (gbest V×U),
-`{task}_hbahbd.csv` (per-iteration HBA/HBD), `console_{task}.log`.
+with defaults `--chem_weight w = 0.40`, `--hba_sigma = --hbd_sigma = 1.0`,
+`--hba_target 4`, `--hbd_target 3`. When HBA=4 and HBD=3 the closeness factor is 1
+and the objective reduces to V×U; deviations shrink it, so the swarm is driven
+toward both high V×U and the H-bond targets. The optimizer
+(`qpso_optimizer_ae.py`) receives this scorer through a `fitness_fn` hook.
+
+**Runs (launched 2026-07-07, one M per DGX node, 8 GPUs each, tmux, 10\,000 shots,
+T=150, target HBA=4 / HBD=3).**
+
+| M | node | tmux session |
+|---|---|---|
+| 16 | dgx101 | `multiobj_M16` |
+| 32 | dgx104 | `multiobj_M32` |
+| 64 | dgx105 | `multiobj_M64` |
+| 128 | dgx107 | `multiobj_M128` |
+
+Launch (per node): `bash run_hbahbd_multiobj.sh <M>`. Outputs (gitignored; on shared
+beegfs under `results_hbahbd_multiobj/`): `{task}.log` (reference-format),
+`{task}_multiobj.csv`, `{task}_multiobj_best.json`, `console_multiobj_M{M}.log`.
 
 ---
 
