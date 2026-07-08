@@ -1,0 +1,17 @@
+{
+  "iter_label": 141,
+  "phase": "iter",
+  "best_particle": 5,
+  "objective": 0.7832279134768896,
+  "validity": 0.8515,
+  "uniqueness": 0.9264826776277157,
+  "product_validity_uniqueness": 0.7888999999999999,
+  "HBA": 3.862360540223136,
+  "HBD": 3.131650029359953,
+  "HBA_error": 0.1376394597768642,
+  "HBD_error": 0.13165002935995318,
+  "chem_closeness": 0.9820253310840718,
+  "batch_best_vu": 0.7904,
+  "batch_best_vu_HBA": 3.944699917462563,
+  "batch_best_vu_HBD": 3.2661242777974295
+}
