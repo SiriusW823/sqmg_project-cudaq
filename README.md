@@ -13,7 +13,13 @@ Surpass the Bayesian Optimization (BO) baseline reported in Chen et al. 2025
 
 ```
 Target metric : V × U (validity × uniqueness) > 0.8834
-Paper baseline: V = 0.955, U = 0.925, V × U = 0.8834  (num_sample = 5 000, ~355 BO evaluations)
+Paper baseline: V = 0.955, U = 0.925, V × U = 0.8834  (reconstructed from Chen et al.'s
+released BO log `results_reference/chen2025_unconditional_9.log`: num_sample = **10 000**,
+peak at iteration **536** of 603 total logged evaluations across 6 checkpointed restarts.
+NOTE: the paper's Fig. 3a benchmark *text* states 5 000 samples were used for the
+cross-model comparison, but the released log itself used 10 000 — this discrepancy is
+in the source paper, not in our figures. See `figures/make_fig2_with_bo_curve.py` and
+Fig. 2(b) for the reconstructed growth curve.)
 Achieved (V8) : V = 0.9594, U = 0.9704, V × U = 0.9310  (AE-QPSO, M=64, T=150 — +0.0476)
 ```
 
@@ -605,7 +611,7 @@ Four figures are produced for the paper. Generators and rendered figures live in
 | Figure | Content | Generator | Data source |
 |---|---|---|---|
 | Fig 1 | Method workflow (horizontal, quantum–classical hybrid) | `figures/fig1_workflow.tex` | none (design) |
-| Fig 2 | Optimizer ablation (BO / pure QPSO / +Sobol / AE-QPSO), V and U | `figures/make_figs_v2.py` | `results_qpso_nosobol/`, `results_qpso_pure/`, `results_v8/` |
+| Fig 2 | (a) Optimizer ablation bars (BO / pure QPSO / +Sobol / AE-QPSO); (b) BO growth curve reconstructed from Chen et al.'s released log | `figures/make_fig2_with_bo_curve.py` | `results_qpso_nosobol/`, `results_qpso_pure/`, `results_v8/`, `results_reference/chen2025_unconditional_9.log` |
 | Fig 3 | Convergence of best V×U vs iteration for M=16…128 | `figures/make_figs_v2.py` | `results_sweep_M*/` + `results_v8/` |
 | Fig 4 | Conditional HBA/HBD vs reference: V×U, HBA, HBD per iteration | `figures/make_fig4.py` | `results_hbahbd/` + reference log |
 
