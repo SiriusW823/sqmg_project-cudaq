@@ -211,7 +211,7 @@ sqmg_project-cudaq/
 │   ├── generator_cudaq.py                    ← MoleculeGeneratorCUDAQ
 │   └── utils/                                ← dynamic circuit, chemistry processing, V/U scoring, weights
 ├── figures/                                  ← paper figures (fig1_workflow, fig2_VU_bars,
-│                                                fig3_convergence, fig4_hbahbd_compare) + generators
+│                                                fig3_convergence, fig4_hbahbd_compare)
 ├── results_*/                                ← run logs / CSVs (large logs git-ignored; live on the cluster)
 ├── docs/                                      ← reference log-format template
 ├── requirements.txt
