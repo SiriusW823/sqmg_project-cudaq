@@ -213,7 +213,7 @@ sqmg_project-cudaq/
 ├── figures/                                  ← paper figures (fig1_workflow, fig2_VU_bars,
 │                                                fig3_convergence, fig4_hbahbd_compare) + generators
 ├── results_*/                                ← run logs / CSVs (large logs git-ignored; live on the cluster)
-├── docs/                                      ← HBA/HBD measure-only handoff + reference log template
+├── docs/                                      ← reference log-format template
 ├── requirements.txt
 └── .gitignore
 ```
@@ -290,10 +290,9 @@ while true; do clear; nvidia-smi; sleep 10; done
 - **`num_sample = 5000`** matches Chen 2025 for a fair comparison; `10000` biases
   uniqueness upward.
 
-The opt-in *measure-only* HBA/HBD channel (records mean HBA/HBD without changing
-the objective) is documented in
-[`docs/hbahbd_measurement_v10.4_handoff.md`](docs/hbahbd_measurement_v10.4_handoff.md);
-the multi-objective runner above instead folds HBA/HBD into the fitness.
+The primary runner also supports an opt-in *measure-only* HBA/HBD channel that
+records mean HBA/HBD without changing the objective; the multi-objective runner
+above instead folds HBA/HBD into the fitness.
 
 ---
 
