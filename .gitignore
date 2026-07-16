@@ -43,3 +43,6 @@ results_no_chemistry_constraint_bo/
 # OS
 .DS_Store
 Thumbs.db
+ 
+# Local scratch / working copy 
+SQMG/
