@@ -200,26 +200,101 @@ python -c "from scipy.stats import qmc; print('scipy OK')"
 
 ```
 sqmg_project-cudaq/
-├── run_qpso_qmg_cudaq.py                    ← primary entry point (unconditional + opt-in HBA/HBD measure-only)
+│
+│  ── Paper pipeline (produced the published results) ────────────────────
+├── run_qpso_qmg_cudaq.py                    ← primary paper runner (unconditional + opt-in HBA/HBD measure-only)
 ├── run_qpso_qmg_cudaq_hbahbd_multiobj.py    ← multi-objective runner (HBA/HBD in the objective)
-├── qpso_optimizer_ae.py                     ← RR-QPSO optimizer (Sobol / rank-refined mbest / fitness-guided refinement)
-├── qpso_optimizer_qmg.py                    ← legacy QPSO (reference only)
-├── worker_eval.py                           ← per-GPU subprocess worker (sample → decode → V/U [+ HBA/HBD])
-├── run_qpso_qmg_mpi.py                       ← MPI fallback (subprocess pool is the primary path)
-├── run_sweep.sh / run_hbahbd_multiobj.sh     ← Fig. 3 sweep / Fig. 4 multi-objective drivers
+├── qpso_optimizer_ae.py                     ← RR-QPSO core (rank-refined mbest / OBL / fitness-guided refinement)
+│
+│  ── Benchmark framework (algorithm comparison, v12) ────────────────────
+├── run_experiment.py                        ← unified entry point for all 8 optimizers
+├── optimizers/                              ← one interface, shared budget accounting
+│   ├── base.py                                 BaseOptimizer: budget, CSV schema, checkpoint/resume
+│   ├── qpso.py                                 QPSO (baseline) + RRQPSO (this work, with ablation switches)
+│   ├── bayesopt.py                             BO (sequential) + Batch BO (q-EI)
+│   └── baselines.py                            CMA-ES, DE, SPSA, Sobol random search
+├── benchmark/                               ← launch, analyse, and validate comparison runs
+│   ├── launch_benchmark.py / benchmark.slurm   SLURM submission
+│   ├── analyze_benchmark.py                    convergence curves + summary tables
+│   ├── stats_test.py                           paired Wilcoxon, Holm-Bonferroni, Cliff's delta
+│   ├── revalidate.py                           re-score best parameters at higher shot counts
+│   └── shot_seed_test.py                       quantifies selection bias from shot noise
+│
+│  ── Evaluation / dispatch layer ────────────────────────────────────────
+├── evaluator.py                             ← θ → (V, U); local pool, persistent pool, or multi-node
+├── worker_eval.py                           ← one subprocess, one GPU, one cudaq.sample()
+├── persistent_worker.py                     ← long-lived worker (≈5.6× faster than per-eval spawn)
+├── node_agent.py                            ← per-node agent for multi-node dispatch
+├── run_multinode.slurm                      ← multi-node srun driver
+│
+│  ── Quantum molecular generator (unchanged from Chen et al. 2025) ──────
 ├── qmg/
-│   ├── generator_cudaq.py                    ← MoleculeGeneratorCUDAQ
-│   └── utils/                                ← dynamic circuit, chemistry processing, V/U scoring, weights
-├── figures/                                  ← paper figures (fig1_workflow, fig2_VU_bars,
-│                                                fig3_convergence, fig4_hbahbd_compare)
-├── results_*/                                ← run logs / CSVs (large logs git-ignored; live on the cluster)
-├── docs/                                      ← reference log-format template
+│   ├── generator_cudaq.py                      MoleculeGeneratorCUDAQ
+│   └── utils/                                  dynamic circuit, chemistry processing, V/U scoring, weights
+│
+│  ── Hardware / documentation / data ────────────────────────────────────
+├── run_iqm_qpu.py                           ← IQM Resonance feasibility analysis (see note below)
+├── docs/
+│   ├── STRUCTURE.md                            architecture cheat-sheet
+│   ├── EXPERIMENT_DESIGN.md                    fair-comparison protocol and statistical plan
+│   └── *.TEMPLATE.log                          reference log format
+├── figures/                                 ← paper figures (fig1–fig4, PNG + PDF + TikZ source)
+├── results/                                 ← paper data, grouped per figure
+├── results_hbahbd_multiobj/                 ← Fig. 4 multi-objective data
+├── legacy/                                  ← superseded runners, kept for traceability — do not use
 ├── requirements.txt
 └── .gitignore
 ```
 
-Large run logs / CSVs / `.npy` are git-ignored (they are big and live on the
-cluster). Paper-relevant logs are grouped per figure under `results_*/`.
+**Two entry points, on purpose.** `run_qpso_qmg_cudaq.py` produced the published
+numbers and is frozen for reproducibility. `run_experiment.py` is the newer
+framework used for the algorithm comparison; it drives the *same*
+`qpso_optimizer_ae.py` core rather than reimplementing it, so the two cannot
+silently diverge.
+
+Large run logs / CSVs / `.npy` are git-ignored by default; paper-relevant data
+is force-added under `results/` and `results_hbahbd_multiobj/`.
+
+---
+
+## Algorithm comparison (v12 framework)
+
+Eight optimizers behind one interface, all held to an identical evaluation
+budget by `optimizers/base.py`:
+
+| `--optimizer` | Algorithm | Parallelism |
+|---|---|---|
+| `sobol` | Sobol random search | M |
+| `spsa` | SPSA | M |
+| `de` | Differential Evolution | M |
+| `cmaes` | CMA-ES | M |
+| `bo` | Bayesian Optimization (GP + EI) | **1** (inherently sequential) |
+| `batch_bo` | Batch BO (GP + q-EI) | M |
+| `qpso` | QPSO | M |
+| `rr_qpso` | **RR-QPSO (this work)** | M |
+
+```bash
+# single run
+python run_experiment.py --optimizer rr_qpso --objective vu --M 64 --T 32 --seed 0
+
+# full comparison sweep on SLURM
+python benchmark/launch_benchmark.py --M 32 --T 16 --seeds 5
+
+# analysis + significance tests
+python benchmark/analyze_benchmark.py --data_dir results_benchmark
+python benchmark/stats_test.py       --data_dir results_benchmark
+```
+
+Fairness is enforced structurally rather than by convention: `_evaluate_metrics()`
+in `optimizers/base.py` counts every objective call and raises `BudgetExhausted`
+at the cap, so sequential BO and population-based CMA-ES consume exactly the same
+number of circuit evaluations. Every optimizer writes the same CSV schema, and a
+single analysis script reads them all. See `docs/EXPERIMENT_DESIGN.md` for the
+paired-blocking design and the statistical tests.
+
+`optimizers/qpso.py` additionally exposes `--ablate {sobol,obl,ae,vu,mc}` to
+switch off one RR-QPSO component at a time, which is how each component's
+contribution is measured.
 
 ---
 
@@ -293,6 +368,26 @@ while true; do clear; nvidia-smi; sleep 10; done
 The primary runner also supports an opt-in *measure-only* HBA/HBD channel that
 records mean HBA/HBD without changing the objective; the multi-objective runner
 above instead folds HBA/HBD into the fitness.
+
+### Why this circuit cannot run on current QPU cloud backends
+
+`run_iqm_qpu.py` documents a feasibility analysis against IQM Resonance. The
+result is negative, and the reason is structural rather than a quota or access
+issue:
+
+- The `_qmg_n9` kernel performs **90 mid-circuit measurements** driving **85
+  classical conditionals**, of which **79 gate two-qubit operations**.
+- CUDA-Q compiles remote submissions to **Base Profile QIR**, which forbids
+  branching on measurement results entirely.
+- IQM's native instruction set offers `cc_prx` (classically-controlled
+  single-qubit rotation with a single feedback key) but no classically-controlled
+  two-qubit gate, so the conditional `CRY`/`CX` operations have no hardware
+  equivalent.
+
+Only Phase 1 of the circuit (4 qubits, 10 gates, branch-free) maps to hardware.
+Executing the full generator would require either Adaptive Profile QIR support or
+restructuring the circuit to eliminate conditional entanglement — a change to the
+generator, which this work deliberately leaves untouched.
 
 ---
 

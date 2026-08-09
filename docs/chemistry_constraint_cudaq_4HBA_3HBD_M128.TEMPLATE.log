@@ -1,0 +1,81 @@
+# =============================================================================
+# 這是「輸出 log 格式雛形」，不是真實結果。所有數值皆為【示意值】。
+# 真實 log 由 DGX111 執行後自動產生於：
+#   results_hbahbd/chemistry_constraint_cudaq_4HBA_3HBD_M128.log
+# 下面示範開啟 --hba_target 4 --hbd_target 3 後，主 log 會長什麼樣子，
+# 以便與參考檔 chemistry_constraint_qiskit_4HBA_3HBD_0.log 逐項對比。
+# =============================================================================
+
+2026-07-02 10:00:00,000 - Task name: chemistry_constraint_cudaq_4HBA_3HBD_M128
+2026-07-02 10:00:00,001 - Task: ['product_validity_uniqueness', 'HBA', 'HBD']
+2026-07-02 10:00:00,002 - Condition: ['None', '4', '3']
+2026-07-02 10:00:00,003 - objective: ['maximize', 'measure', 'measure']
+2026-07-02 10:00:00,004 -   ⚠ HBA/HBD 為量測/記錄欄位（非最適化目標）。QPSO 目標與 v10.3 完全相同：maximize V×U。
+2026-07-02 10:00:00,005 - # of heavy atoms: 9
+2026-07-02 10:00:00,006 - # of samples: 10000  (v10.2 預設 5000，與 Chen 2025 對齊，birthday paradox 修正)
+2026-07-02 10:00:00,007 - smarts: None
+2026-07-02 10:00:00,008 - disable_connectivity_position: []
+2026-07-02 10:00:00,009 - CUDA-Q backend: cudaq_nvidia
+2026-07-02 10:00:00,010 - [v10.3] 初始化策略: Sobol scrambled (seed=0, 確定性)
+2026-07-02 10:00:00,011 - [v10.3] OBL Phase 0: ✓ 開啟
+2026-07-02 10:00:00,013 - [v10.1→v10.2] 評估模式: parallel subprocess pool  N_GPUS=8  GPU_IDs=['0','1','2','3','4','5','6','7']
+2026-07-02 10:00:00,014 - [v10.3] subprocess_timeout: 900s
+2026-07-02 10:00:00,120 -   GPU: 0, Tesla V100-SXM2-16GB, 16384 MiB, 535.183.01
+2026-07-02 10:00:00,121 -   ... (GPU 1..7) ...
+2026-07-02 10:00:00,130 -   CUDA-Q: 0.7.1
+2026-07-02 10:00:00,140 - Number of flexible parameters: 134
+2026-07-02 10:00:00,150 - [v10.2 config] M=128  T=150  total_evals≈19456  每批次 16 輪 × 8 GPU  預估：95.9h  (num_sample=10000，~142s/eval)
+2026-07-02 10:00:00,151 -   ↑ 注意：此預估以 142s/eval 硬編碼，10000 shots 實際約 ~284s/eval，真實時間約 ~190h。
+2026-07-02 10:00:00,160 - [v10.4] HBA/HBD 量測記錄：✓ 開啟  (HBA target=4.0, HBD target=3.0)  CSV=results_hbahbd/chemistry_constraint_cudaq_4HBA_3HBD_M128_hbahbd.csv
+2026-07-02 10:00:10,000 - [v10.3] 並行驗證完成（10.0s）  ✓ 所有 GPU 正常
+2026-07-02 10:00:10,050 - [v10.3] 使用 8-GPU 並行模式  GPU IDs: ['0','1','2','3','4','5','6','7']
+2026-07-02 10:00:10,200 - [Sobol v10.2] 初始化完成  n=128  d=134  discrepancy=... (確定性)
+
+# ---- Phase 0（初始 128 粒子評估）----
+# optimizer 既有的逐粒子輸出（V/U/fitness）照舊出現：
+2026-07-02 10:05:00,000 - Iteration number: 0
+2026-07-02 10:05:00,001 - validity (maximize): 0.9XX
+2026-07-02 10:05:00,002 - uniqueness (maximize): 0.8XX
+2026-07-02 10:05:00,003 -   [AE-QPSO v1.5] iter=0  p=0  fit=0.8XXX  gbest=0.8XXX  ...
+#   ... (p=1..127) ...
+# ★ v10.4 新增：本批次結束後的 HBA/HBD 量測（該批次 V×U 最佳粒子）：
+2026-07-02 10:40:00,000 - [HBA/HBD 量測] Iteration number: 0
+2026-07-02 10:40:00,001 - product_validity_uniqueness (maximize): 0.7XX
+2026-07-02 10:40:00,002 - HBA (close to 4): 3.XXX
+2026-07-02 10:40:00,003 - HBD (close to 3): 2.XXX
+2026-07-02 10:40:00,004 -   [批次分布] mean_HBA=3.XXX  mean_HBD=2.XXX  (best particle #NN, valid 1XX/128)
+
+# ---- OBL 批次（不佔用迭代編號）----
+2026-07-02 11:20:00,000 - [HBA/HBD 量測] OBL 批次（不計入迭代編號）
+2026-07-02 11:20:00,001 - product_validity_uniqueness (maximize): 0.6XX
+2026-07-02 11:20:00,002 - HBA (close to 4): 3.XXX
+2026-07-02 11:20:00,003 - HBD (close to 3): 2.XXX
+
+# ---- 主迭代 1 ----
+2026-07-02 12:00:00,000 - Iteration number: 129        # optimizer 的全域 eval 計數（照舊）
+2026-07-02 12:00:00,001 - validity (maximize): 0.9XX
+2026-07-02 12:00:00,002 - uniqueness (maximize): 0.9XX
+#   ... 逐粒子 ...
+2026-07-02 12:00:05,000 -   [AE-QPSO v1.5 Iter   1/150] α=...  gbest=0.9XXX (V=0.9XX U=0.9XX)  ...
+2026-07-02 12:35:00,000 - [HBA/HBD 量測] Iteration number: 1
+2026-07-02 12:35:00,001 - product_validity_uniqueness (maximize): 0.8XX
+2026-07-02 12:35:00,002 - HBA (close to 4): 3.9XX
+2026-07-02 12:35:00,003 - HBD (close to 3): 3.0XX
+2026-07-02 12:35:00,004 -   [批次分布] mean_HBA=3.9XX  mean_HBD=3.0XX  (best particle #NN, valid 1XX/128)
+
+#   ... Iteration number: 2 .. 150（同格式）...
+
+# ---- 最終摘要（optimizer 既有輸出）----
+2026-07-10 XX:XX:XX,XXX - AE-SOQPSO 優化完成（v1.5/V8）
+2026-07-10 XX:XX:XX,XXX -   Best V×U                : 0.9XXXXX
+2026-07-10 XX:XX:XX,XXX -   Best V                  : 0.9XXX
+2026-07-10 XX:XX:XX,XXX -   Best U                  : 0.9XXX
+2026-07-10 XX:XX:XX,XXX -   BO Baseline            : 0.8834  ✓ 超越！
+2026-07-10 XX:XX:XX,XXX - 最佳參數已儲存: results_hbahbd/chemistry_constraint_cudaq_4HBA_3HBD_M128_best_params.npy
+
+# =============================================================================
+# 逐代 HBA/HBD 明細另存於 *_hbahbd.csv，欄位：
+#   iter_label,phase,best_particle,product_validity_uniqueness,HBA,HBD,batch_mean_HBA,batch_mean_HBD
+# 可直接與參考檔 chemistry_constraint_qiskit_4HBA_3HBD_0.log 的
+#   "HBA (close to 4)" / "HBD (close to 3)" 逐代對照。
+# =============================================================================
