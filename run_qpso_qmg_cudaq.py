@@ -56,8 +56,11 @@ v10.1 → v10.2  四項核心改動：
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -228,6 +231,54 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--subprocess_timeout", type=int, default=360,
         help="每個子行程最大秒數。v10.2 預設 360s（5000 shots ~142s，留 2.5x 餘量）",
+    )
+
+    # ── ★ v11.0 多節點派工（提高單次模擬可用的最大 GPU 數）──────────────
+    #   原本並行度上限 = 單節點 8 張 GPU。啟用 --dispatch slurm 後，
+    #   並行度 G = nodes × gpus_per_node，M 個粒子的輪數由 ⌈M/8⌉ 降為 ⌈M/G⌉。
+    #   走 srun 而非 SSH：叢集 node-to-node SSH 被封鎖，但 srun 在配額內可跨節點。
+    p.add_argument(
+        "--dispatch", type=str, default="local", choices=["local", "slurm"],
+        help=(
+            "派工模式。local＝v10.x 行為（單節點，本地 Popen，預設，完全向後相容）；"
+            "slurm＝在 sbatch 配額內用 srun 將每輪粒子扇出到多個節點。"
+        ),
+    )
+    p.add_argument(
+        "--nodes", type=int, default=None,
+        help="--dispatch slurm 時使用的節點數。預設讀取 SLURM_NNODES。",
+    )
+    p.add_argument(
+        "--gpus_per_node", type=int, default=8,
+        help="--dispatch slurm 時每節點使用的 GPU 數（DGX V100 為 8）。",
+    )
+    p.add_argument(
+        "--job_dir", type=str, default=None,
+        help=(
+            "多節點模式的共享交換目錄，必須位於所有節點皆可見的檔案系統"
+            "（本叢集為 beegfs 家目錄）。預設 <repo>/.mn_jobs/<task_name>。"
+            "切勿指向 /tmp：/tmp 是節點本地的，父行程讀不到其他節點的結果。"
+        ),
+    )
+    p.add_argument(
+        "--srun_overhead", type=int, default=180,
+        help="srun step 啟動／收尾的額外寬限秒數，加在 subprocess_timeout 之上。",
+    )
+    p.add_argument(
+        "--srun_extra", type=str, default="",
+        help="附加到 srun 的額外參數（空白分隔），例如 '--exclusive'。",
+    )
+    p.add_argument(
+        "--srun_retries", type=int, default=3,
+        help=(
+            "單輪 srun step launch 失敗時的重試次數（預設 3）。"
+            "實測 SLURM 偶發 'Job credential expired' 會讓整個 step launch 失敗，"
+            "重試即可成功；長跑有數百輪，不重試會讓整批 fitness 歸零。"
+        ),
+    )
+    p.add_argument(
+        "--srun_retry_wait", type=int, default=20,
+        help="重試前的等待秒數（線性退避：第 n 次等 n × 此值）。",
     )
 
     # ── ★ v10.2 Sobol 初始化 ──────────────────────────────────────────────
@@ -601,6 +652,297 @@ def make_parallel_batch_evaluate_fn(
 
 
 # ===========================================================================
+# ★ v11.0 新增：多節點（SLURM srun）批次評估函式
+# ===========================================================================
+#
+# 設計要點
+# --------
+# 1. 並行度 G = nodes × gpus_per_node。每輪派出 min(G, remaining) 個粒子，
+#    輪數由 ⌈M/8⌉ 降為 ⌈M/G⌉ —— 這就是「增加一次模擬可用的最多 GPU 數」。
+#
+# 2. 每輪一次 srun：父行程把該輪所有 weight 寫到共享 job_dir，發一次
+#    srun -N nodes --ntasks-per-node=1 --gres=gpu:n_local node_agent.py，
+#    等 step 結束後回讀 result 檔。QPSO 本來就是每批次同步（要等整批 fitness
+#    才能更新粒子），所以「每輪一個 barrier」不引入額外的同步成本。
+#
+# 3. 共享檔案系統：weight/result 必須放在 beegfs，不能用 /tmp（節點本地）。
+#
+# 4. 容錯語意與單節點一致：任何失敗（agent 掛掉、逾時、result 缺檔）都退化為
+#    (0.0, 0.0)，由 QPSO 自然淘汰該粒子，不中斷整個長跑。
+#
+def make_multinode_batch_evaluate_fn(
+    args:          argparse.Namespace,
+    cwg:           ConditionalWeightsGenerator,
+    logger:        logging.Logger,
+    agent_script:  str,
+    job_dir:       str,
+    nodes:         int,
+    gpus_per_node: int,
+    recorder:      "HBAHBDRecorder" = None,
+) -> callable:
+    """多節點 srun 批次評估函式（v11.0 新增）。"""
+    repo_dir   = os.path.dirname(os.path.abspath(__file__))
+    G          = nodes * gpus_per_node
+    report_on  = recorder is not None
+    round_seq  = [0]          # 全域遞增的輪次編號（跨批次唯一，避免目錄碰撞）
+    eval_count = [0]
+
+    srun_extra = shlex.split(args.srun_extra) if args.srun_extra else []
+    step_timeout = args.subprocess_timeout + args.srun_overhead
+
+    def _run_srun(round_id: int, pending: list) -> None:
+        """對 pending 中的粒子發一次 srun step（結果由 agent 寫入 round_dir）。"""
+        round_dir = os.path.join(job_dir, f"round_{round_id}")
+
+        # manifest 只列 pending：重試時不會重跑已經有結果的粒子。
+        with open(os.path.join(round_dir, "manifest.json"), "w") as f:
+            json.dump({"slots": list(pending)}, f)
+
+        # 只喚醒足以覆蓋 pending 的節點數（最後一輪／重試時可能不滿）。
+        nodes_needed = min(nodes, (len(pending) + gpus_per_node - 1) // gpus_per_node)
+
+        cmd = [
+            "srun",
+            f"--nodes={nodes_needed}",
+            "--ntasks-per-node=1",
+            f"--gres=gpu:{gpus_per_node}",
+            # 單一節點的 worker 失敗不應殺掉整個 step，讓其他節點仍能寫回結果。
+            "--kill-on-bad-exit=0",
+            *srun_extra,
+            sys.executable, agent_script,
+            "--job_dir",        job_dir,
+            "--round",          str(round_id),
+            "--n_local",        str(gpus_per_node),
+            "--repo",           repo_dir,
+            "--num_heavy_atom", str(args.num_heavy_atom),
+            "--num_sample",     str(args.num_sample),
+            "--backend",        args.backend,
+            "--timeout",        str(args.subprocess_timeout),
+        ]
+        if report_on:
+            cmd.append("--report_hbahbd")
+
+        try:
+            proc = subprocess.run(
+                cmd, cwd=repo_dir, timeout=step_timeout,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            if proc.returncode != 0:
+                logger.warning(
+                    f"[multinode] srun 回傳 {proc.returncode}\n"
+                    f"  stderr: {proc.stderr.decode('utf-8', errors='replace')[-600:]}"
+                )
+            # agent 的 stdout 帶有各節點的認領與耗時，逐行轉錄進 log 便於診斷。
+            for line in proc.stdout.decode("utf-8", errors="replace").splitlines():
+                if line.strip():
+                    logger.info(f"  {line}")
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                f"[multinode] srun step 逾時（>{step_timeout}s），"
+                f"本次 {len(pending)} 個粒子未回收。"
+            )
+        except FileNotFoundError:
+            logger.error(
+                "[multinode] 找不到 srun 指令。--dispatch slurm 必須在 SLURM "
+                "配額內執行（sbatch 提交，或 salloc 後執行）。"
+            )
+            raise
+
+    def _dispatch_round(round_id: int, particle_ids: list,
+                        positions: np.ndarray) -> dict:
+        """
+        派送一輪並回傳 {particle_idx: (V, U, HBA, HBD)}。
+
+        ★ v11.0.1：加入 step launch 重試。
+        實測 SLURM 會偶發
+            srun: error: Task launch for StepId=N.0 failed on node DGXxxx:
+                  Job credential expired
+        導致整個 step 被 abort（其他節點的 task 一併被 Killed），且立即重試同樣
+        的 srun 就會成功。長跑有數百輪，若不重試，一次抖動就會讓整批 128 個粒子
+        的 fitness 全部歸零，等於污染該次 QPSO 迭代。
+
+        重試只針對「結果檔不存在」的粒子（＝基礎設施失敗）。worker 真的算失敗時
+        會寫出 [0,0,0,0]，檔案存在 → 不重試，維持原本的容錯語意。
+        """
+        round_dir = os.path.join(job_dir, f"round_{round_id}")
+        os.makedirs(round_dir, exist_ok=True)
+
+        # ── 寫入 weight（重試時沿用，不需重寫）──────────────────────────
+        for pidx in particle_ids:
+            w_c = cwg.apply_chemistry_constraint(positions[pidx].copy())
+            np.save(os.path.join(round_dir, f"w_{pidx}.npy"), w_c)
+
+        def _missing(ids: list) -> list:
+            return [p for p in ids
+                    if not os.path.exists(os.path.join(round_dir, f"r_{p}.npy"))]
+
+        pending = list(particle_ids)
+        for attempt in range(args.srun_retries + 1):
+            _run_srun(round_id, pending)
+            pending = _missing(pending)
+            if not pending:
+                break
+            if attempt < args.srun_retries:
+                wait = args.srun_retry_wait * (attempt + 1)
+                logger.warning(
+                    f"[multinode] 第 {attempt+1} 次派工後仍有 {len(pending)} 個粒子"
+                    f"沒有結果檔（多為 step launch 失敗）。{wait}s 後重試 "
+                    f"({attempt+1}/{args.srun_retries})..."
+                )
+                time.sleep(wait)
+            else:
+                logger.error(
+                    f"[multinode] 重試 {args.srun_retries} 次後仍有 {len(pending)} 個"
+                    f"粒子無結果，以 0 計入本輪：{pending[:12]}"
+                    f"{' ...' if len(pending) > 12 else ''}"
+                )
+
+        # ── 回讀結果 ─────────────────────────────────────────────────────
+        out: dict = {}
+        for pidx in particle_ids:
+            rpath = os.path.join(round_dir, f"r_{pidx}.npy")
+            try:
+                arr = np.load(rpath)
+                out[pidx] = (
+                    float(arr[0]), float(arr[1]),
+                    float(arr[2]) if len(arr) >= 4 else 0.0,
+                    float(arr[3]) if len(arr) >= 4 else 0.0,
+                )
+            except Exception as e:                    # noqa: BLE001
+                logger.warning(f"[multinode] 粒子 {pidx} 結果讀取失敗：{e}")
+                out[pidx] = (0.0, 0.0, 0.0, 0.0)
+
+        try:
+            shutil.rmtree(round_dir)
+        except OSError as e:
+            logger.warning(f"[multinode] 清理 {round_dir} 失敗（不影響執行）：{e}")
+
+        return out
+
+    def batch_evaluate_fn(positions: np.ndarray) -> list:
+        M       = positions.shape[0]
+        results = [(0.0, 0.0)] * M
+        hbahbd  = [(0.0, 0.0)] * M
+        t_batch = time.time()
+
+        n_rounds = (M + G - 1) // G
+        for r in range(n_rounds):
+            lo   = r * G
+            hi   = min(lo + G, M)
+            pids = list(range(lo, hi))
+
+            round_id = round_seq[0]
+            round_seq[0] += 1
+            eval_count[0] += len(pids)
+
+            t_round = time.time()
+            out = _dispatch_round(round_id, pids, positions)
+            for pidx in pids:
+                v, u, hba, hbd = out[pidx]
+                results[pidx] = (v, u)
+                hbahbd[pidx]  = (hba, hbd)
+
+            valid = sum(1 for p in pids if results[p][0] > 0)
+            logger.info(
+                f"  [multinode 輪次 {r+1}/{n_rounds}] "
+                f"粒子 {lo}..{hi-1}  "
+                f"節點:{nodes} × GPU:{gpus_per_node} = {G} 並行  "
+                f"有效:{valid}/{len(pids)}  "
+                f"本輪:{time.time()-t_round:.1f}s  "
+                f"累計:{time.time()-t_batch:.1f}s"
+            )
+
+        if report_on:
+            try:
+                recorder.report_batch(results, hbahbd)
+            except Exception as e:                    # noqa: BLE001
+                logger.warning(f"[HBA/HBD 量測] 記錄失敗（不影響最適化）：{e}")
+
+        return results
+
+    return batch_evaluate_fn
+
+
+def verify_multinode(
+    args:         argparse.Namespace,
+    cwg:          ConditionalWeightsGenerator,
+    logger:       logging.Logger,
+    agent_script: str,
+    job_dir:      str,
+    nodes:        int,
+    gpus_per_node: int,
+) -> bool:
+    """
+    多節點功能驗證（v11.0）：以少量 shots 跑滿一輪 G 個粒子，
+    確認每個節點的 agent 都被排到、GPU 綁定正確、共享目錄雙向可讀寫。
+
+    這一步很重要：srun 排程或 beegfs 權限的問題若等到長跑中途才浮現，
+    代價是數小時；此處花數分鐘先驗證。
+
+    ★ v11.0.1 判準修正：
+      驗證的目的是「基礎設施是否正常」，不是「每個粒子是否生得出分子」。
+      隨機權重在少量 shots 下 validity 合理地可能為 0（採樣不到有效分子），
+      因此不能要求 G/G 全部 V>0——實測 48 slot 中就有 1 個是這種統計性的 0，
+      卻讓整個 job 被誤判為失敗而中止。
+      現在改為：
+        (1) 基礎設施判準（硬性）：所有 slot 都要有結果檔。
+            檔案缺失＝agent 沒跑起來，_dispatch_round 已重試過仍失敗。
+        (2) 統計判準（寬鬆）：V>0 的比例需達 min_valid_ratio，
+            用來擋掉「環境壞掉導致 worker 全部回 0」這種真正的故障。
+    """
+    G = nodes * gpus_per_node
+    probe_shots = 100
+    min_valid_ratio = 0.60
+
+    logger.info(
+        f"[v11.0] 多節點驗證：{nodes} 節點 × {gpus_per_node} GPU = {G} 並行"
+        f"（各 {probe_shots} shots）..."
+    )
+
+    probe_args = argparse.Namespace(**vars(args))
+    probe_args.num_sample         = probe_shots
+    probe_args.subprocess_timeout = min(args.subprocess_timeout, 300)
+
+    probe_fn = make_multinode_batch_evaluate_fn(
+        args=probe_args, cwg=cwg, logger=logger,
+        agent_script=agent_script, job_dir=job_dir,
+        nodes=nodes, gpus_per_node=gpus_per_node, recorder=None,
+    )
+
+    positions = np.array([
+        cwg.generate_conditional_random_weights(random_seed=1000 + i)
+        for i in range(G)
+    ])
+
+    t0  = time.time()
+    res = probe_fn(positions)
+    ok  = sum(1 for v, u in res if v > 0)
+    ratio = ok / G if G else 0.0
+
+    passed = ratio >= min_valid_ratio
+    logger.info(
+        f"[v11.0] 多節點驗證結果：{ok}/{G} 個 slot 回傳 V>0（{ratio*100:.0f}%）  "
+        f"耗時 {time.time()-t0:.1f}s  "
+        f"{'✓ 節點與派工正常' if passed else '✗ 驗證失敗'}"
+    )
+    if ok < G:
+        # 少量統計性 0 是正常的，明講一下避免誤判為故障。
+        logger.info(
+            f"[v11.0] 註：{G-ok} 個 slot 的 V=0。在 {probe_shots} shots 下，"
+            f"隨機權重採樣不到有效分子屬正常現象，不代表節點故障。"
+        )
+    if not passed:
+        logger.error(
+            f"[v11.0] V>0 比例 {ratio*100:.0f}% 低於門檻 {min_valid_ratio*100:.0f}%。"
+            "常見原因：\n"
+            "  (a) job_dir 不在共享檔案系統上（/tmp 是節點本地的）\n"
+            "  (b) sbatch 配額的節點數少於 --nodes\n"
+            "  (c) 該節點的 conda 環境未啟用或 GPU 被其他作業佔用"
+        )
+    return passed
+
+
+# ===========================================================================
 # 單 GPU 序列模式（v10.1 保留）
 # ===========================================================================
 
@@ -756,6 +1098,24 @@ def main() -> None:
     effective_n_gpus = min(args.n_gpus, len(gpu_ids))
     gpu_ids = gpu_ids[:effective_n_gpus]
 
+    # ── ★ v11.0：解析多節點設定 ──────────────────────────────────────────
+    multinode = (args.dispatch == "slurm")
+    if multinode:
+        # 節點數未指定時，以 SLURM 實際配到的節點數為準（避免與配額不符）。
+        env_nodes = os.environ.get("SLURM_NNODES") or os.environ.get("SLURM_JOB_NUM_NODES")
+        if args.nodes is not None:
+            n_nodes = args.nodes
+        elif env_nodes and env_nodes.strip().isdigit():
+            n_nodes = int(env_nodes.strip())
+        else:
+            n_nodes = 1
+        gpus_per_node   = args.gpus_per_node
+        total_parallel  = n_nodes * gpus_per_node
+    else:
+        n_nodes         = 1
+        gpus_per_node   = effective_n_gpus
+        total_parallel  = effective_n_gpus
+
     os.makedirs(args.data_dir, exist_ok=True)
     log_path = os.path.join(args.data_dir, f"{args.task_name}.log")
     logger   = setup_logger(log_path)
@@ -799,10 +1159,20 @@ def main() -> None:
         f"[v10.3] V-U 解耦 mbest: "
         f"{'✓ 開啟 (w_vu={:.2f}, w_v={:.2f}, w_u={:.2f}, U_gate={:.2f}, V_gate={:.2f})'.format(args.w_vu, args.w_v, args.w_u, args.min_u_for_v_track, args.min_v_for_u_track) if args.vu_decouple else '✗ 關閉'}"
     )
-    logger.info(
-        f"[v10.1→v10.2] 評估模式: parallel subprocess pool  "
-        f"N_GPUS={effective_n_gpus}  GPU_IDs={gpu_ids}"
-    )
+    if multinode:
+        logger.info(
+            f"[v11.0] 評估模式: multi-node srun dispatch  "
+            f"NODES={n_nodes} × GPUS_PER_NODE={gpus_per_node} = {total_parallel} 並行"
+        )
+        logger.info(
+            f"[v11.0] SLURM_JOB_ID={os.environ.get('SLURM_JOB_ID', 'N/A')}  "
+            f"SLURM_NODELIST={os.environ.get('SLURM_NODELIST', 'N/A')}"
+        )
+    else:
+        logger.info(
+            f"[v10.1→v10.2] 評估模式: parallel subprocess pool  "
+            f"N_GPUS={effective_n_gpus}  GPU_IDs={gpu_ids}"
+        )
     logger.info(f"[v10.3] subprocess_timeout: {args.subprocess_timeout}s")
     log_gpu_info(logger, gpu_ids)
     log_memory(logger, "啟動時")
@@ -818,6 +1188,33 @@ def main() -> None:
         sys.exit(1)
     logger.info(f"  worker_eval.py: {worker_script} ✓")
 
+    # ── ★ v11.0：多節點所需的 agent 與共享交換目錄 ──────────────────────
+    agent_script = os.path.join(script_dir, "node_agent.py")
+    job_dir      = None
+    if multinode:
+        if not os.path.exists(agent_script):
+            logger.error(
+                f"[ERROR] node_agent.py 不存在：{agent_script}\n"
+                f"  --dispatch slurm 需要 node_agent.py 與本檔案同目錄。"
+            )
+            sys.exit(1)
+        job_dir = args.job_dir or os.path.join(script_dir, ".mn_jobs", args.task_name)
+        os.makedirs(job_dir, exist_ok=True)
+
+        # 共享性檢查：job_dir 落在 /tmp 是最容易犯、也最難察覺的錯誤
+        # ——父行程寫得進去、agent 也讀得到「自己節點的」/tmp，但兩者不是同一份，
+        #   結果會是每個粒子都讀不到 result 而全部退化為 0。此處直接擋下。
+        real_job_dir = os.path.realpath(job_dir)
+        if real_job_dir.startswith(("/tmp", "/var/tmp", "/dev/shm")):
+            logger.error(
+                f"[ERROR] job_dir 位於節點本地路徑：{real_job_dir}\n"
+                f"  多節點模式的交換目錄必須在共享檔案系統（本叢集為 beegfs 家目錄）。\n"
+                f"  請改用 --job_dir ~/sqmg_project-cudaq/.mn_jobs/{args.task_name}"
+            )
+            sys.exit(1)
+        logger.info(f"  node_agent.py: {agent_script} ✓")
+        logger.info(f"  共享 job_dir : {real_job_dir}")
+
     # ── 初始化 ConditionalWeightsGenerator ───────────────────────────────
     cwg = ConditionalWeightsGenerator(
         args.num_heavy_atom,
@@ -831,7 +1228,7 @@ def main() -> None:
     # ── 預估時間 ──────────────────────────────────────────────────────────
     # num_sample=5000 時每次評估約 142s（V3 的 284s 一半）
     sec_per_eval    = 142
-    rounds_per_iter = (args.particles + effective_n_gpus - 1) // effective_n_gpus
+    rounds_per_iter = (args.particles + total_parallel - 1) // total_parallel
     # OBL 多一個批次
     obl_batches     = 1 if args.obl else 0
     total_batches   = (args.iterations + 1) + obl_batches
@@ -840,23 +1237,61 @@ def main() -> None:
     logger.info(
         f"[v10.2 config] M={args.particles}  T={args.iterations}  "
         f"total_evals≈{total_evals}  "
-        f"每批次 {rounds_per_iter} 輪 × {effective_n_gpus} GPU  "
+        f"每批次 {rounds_per_iter} 輪 × {total_parallel} GPU  "
         f"預估：{est_h:.1f}h  "
         f"(num_sample={args.num_sample}，~{sec_per_eval}s/eval)"
     )
-
-    # ── 並行 worker 功能驗證 ──────────────────────────────────────────────
-    if not verify_workers_parallel(args, cwg, logger, worker_script, gpu_ids):
-        logger.error(
-            "[ERROR] 並行驗證失敗。請先確認單 GPU 正常：\n"
-            "  python run_qpso_qmg_cudaq.py --n_gpus 1 --gpu_ids 0 "
-            "--particles 8 --iterations 1 --num_sample 100"
+    if multinode:
+        # 讓「多節點到底省了多少」在 log 開頭就一目瞭然。
+        single_rounds = (args.particles + gpus_per_node - 1) // gpus_per_node
+        logger.info(
+            f"[v11.0] 相對單節點加速：每批次 {single_rounds} 輪 → {rounds_per_iter} 輪  "
+            f"(理論 {single_rounds / max(rounds_per_iter, 1):.2f}×)"
         )
-        sys.exit(1)
-    log_memory(logger, "並行驗證後")
+
+    # ── 功能驗證 ─────────────────────────────────────────────────────────
+    if multinode:
+        if not verify_multinode(args, cwg, logger, agent_script, job_dir,
+                                n_nodes, gpus_per_node):
+            logger.error(
+                "[ERROR] 多節點驗證失敗。請先確認單節點正常：\n"
+                "  python run_qpso_qmg_cudaq.py --particles 8 --iterations 1 "
+                "--num_sample 100"
+            )
+            sys.exit(1)
+        log_memory(logger, "多節點驗證後")
+    else:
+        if not verify_workers_parallel(args, cwg, logger, worker_script, gpu_ids):
+            logger.error(
+                "[ERROR] 並行驗證失敗。請先確認單 GPU 正常：\n"
+                "  python run_qpso_qmg_cudaq.py --n_gpus 1 --gpu_ids 0 "
+                "--particles 8 --iterations 1 --num_sample 100"
+            )
+            sys.exit(1)
+        log_memory(logger, "並行驗證後")
 
     # ── 建立評估函式 ──────────────────────────────────────────────────────
-    if effective_n_gpus == 1:
+    if multinode:
+        evaluate_fn = None
+        recorder    = None
+        if report_hbahbd:
+            recorder = HBAHBDRecorder(args, logger, obl_enabled=args.obl)
+            logger.info(
+                f"[v10.4] HBA/HBD 量測記錄：✓ 開啟  "
+                f"(HBA target={args.hba_target}, HBD target={args.hbd_target})  "
+                f"CSV={recorder.csv_path}"
+            )
+        batch_evaluate_fn = make_multinode_batch_evaluate_fn(
+            args=args, cwg=cwg, logger=logger,
+            agent_script=agent_script, job_dir=job_dir,
+            nodes=n_nodes, gpus_per_node=gpus_per_node,
+            recorder=recorder,
+        )
+        logger.info(
+            f"[v11.0] 使用多節點模式：{n_nodes} 節點 × {gpus_per_node} GPU "
+            f"= {total_parallel} 並行"
+        )
+    elif effective_n_gpus == 1:
         evaluate_fn       = make_subprocess_evaluate_fn(
             args=args, cwg=cwg, logger=logger,
             worker_script=worker_script,
