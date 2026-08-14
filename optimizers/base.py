@@ -83,6 +83,7 @@ class BaseOptimizer(ABC):
         batch_size:        int = 32,
         fitness_fn:        Optional[Callable[[Tuple[float, ...]], float]] = None,
         resume:            bool = False,
+        force_overwrite:   bool = False,
     ):
         self.D          = n_params
         self.max_evals  = max_evals
@@ -120,8 +121,32 @@ class BaseOptimizer(ABC):
         if resume and os.path.exists(self._csv_path):
             self._restore()
         else:
-            with open(self._csv_path, "w", newline="", encoding="utf-8") as f:
-                csv.DictWriter(f, fieldnames=self.CSV_FIELDS).writeheader()
+            # ★ 防護：resume=False 時原本無條件以 "w" 開檔，等於「只要作業重啟
+            #   就把既有資料清空」。SLURM 把作業退回重排（節點 drain、搶佔、
+            #   requeue）是常態，而重排後的作業沿用原本的 --export，也就沿用
+            #   RESUME=0 —— 實際發生過一次，兩個各累積 4,000+ 次評估的 run
+            #   在重啟後 44 秒內被截斷歸零。
+            #   現在改為：既有 CSV 若已有資料列，不覆寫，改為自動續跑。
+            #   要真的重來請先刪檔，或傳 force_overwrite=True。
+            n_existing = 0
+            if os.path.exists(self._csv_path):
+                try:
+                    with open(self._csv_path, newline="", encoding="utf-8") as f:
+                        n_existing = max(0, sum(1 for _ in f) - 1)
+                except OSError:
+                    n_existing = 0
+
+            if n_existing > 0 and not force_overwrite:
+                self.logger.warning(
+                    f"[safety] {self._csv_path} 已有 {n_existing} 列資料，但本次以 "
+                    f"resume=False 啟動。為避免覆寫既有進度，自動改為續跑。"
+                    f"（若確實要重來：先刪除該檔，或傳 force_overwrite=True）"
+                )
+                self.resume = True
+                self._restore()
+            else:
+                with open(self._csv_path, "w", newline="", encoding="utf-8") as f:
+                    csv.DictWriter(f, fieldnames=self.CSV_FIELDS).writeheader()
 
         self._t0 = None
 
