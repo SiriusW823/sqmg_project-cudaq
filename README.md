@@ -94,6 +94,18 @@ RR-QPSO update.
 
 ---
 
+> ### ⚠ These results are under revision
+>
+> The numbers below come from **single runs (n = 1)**. A subsequent methodological
+> study with paired designs and 10–30 seeds per configuration does not reproduce
+> the ordering: at the same budget, RR-QPSO and plain QPSO are **statistically
+> equivalent** (TOST at ±0.02, p = 0.0011), and no individual RR-QPSO component
+> survives an out-of-sample confirmatory ablation. Separately, the selection bias
+> from shot noise in a single run was measured at **+0.011 to +0.027 in V×U** —
+> larger than two of the three differences reported below.
+>
+> See [`docs/RESULTS.md`](docs/RESULTS.md) for the full study.
+
 ## Results (9-heavy-atom benchmark)
 
 All runs use the 134-parameter, 20-qubit dynamic circuit, CUDA-Q 0.7.1
@@ -235,10 +247,13 @@ sqmg_project-cudaq/
 │  ── Hardware / documentation / data ────────────────────────────────────
 ├── run_iqm_qpu.py                           ← IQM Resonance feasibility analysis (see note below)
 ├── docs/
+│   ├── RESULTS.md                              ★ methodological study: five experiments, full statistics
+│   ├── PREREGISTRATION_ablation_confirmatory.md   analysis plan, committed before the data
 │   ├── STRUCTURE.md                            architecture cheat-sheet
 │   ├── EXPERIMENT_DESIGN.md                    fair-comparison protocol and statistical plan
 │   └── *.TEMPLATE.log                          reference log format
 ├── figures/                                 ← paper figures (fig1–fig4, PNG + PDF + TikZ source)
+├── figures_method/                          ← methodological study figures + stats.json (single source of numbers)
 ├── results/                                 ← paper data, grouped per figure
 ├── results_hbahbd_multiobj/                 ← Fig. 4 multi-objective data
 ├── legacy/                                  ← superseded runners, kept for traceability — do not use
