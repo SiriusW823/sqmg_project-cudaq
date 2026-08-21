@@ -97,12 +97,18 @@ RR-QPSO update.
 > ### ⚠ These results are under revision
 >
 > The numbers below come from **single runs (n = 1)**. A subsequent methodological
-> study with paired designs and 10–30 seeds per configuration does not reproduce
-> the ordering: at the same budget, RR-QPSO and plain QPSO are **statistically
-> equivalent** (TOST at ±0.02, p = 0.0011), and no individual RR-QPSO component
-> survives an out-of-sample confirmatory ablation. Separately, the selection bias
-> from shot noise in a single run was measured at **+0.011 to +0.027 in V×U** —
-> larger than two of the three differences reported below.
+> study with paired designs and 10–30 seeds per configuration splits cleanly in two.
+>
+> **Confirmed, and stronger than reported.** Population-based optimization
+> decisively beats Bayesian optimization: both QPSO and RR-QPSO win **10/10**
+> paired seeds against BO, Cliff's δ = **+1.000** (complete separation),
+> Friedman p = 0.00002.
+>
+> **Not confirmed.** RR-QPSO is **statistically equivalent** to plain QPSO at the
+> same budget (TOST at ±0.02, p = 0.0011), and no individual RR-QPSO component
+> survives an out-of-sample confirmatory ablation. The selection bias from shot
+> noise in a single run was measured at **+0.011 to +0.027 in V×U** — larger than
+> two of the three differences reported below.
 >
 > See [`docs/RESULTS.md`](docs/RESULTS.md) for the full study.
 
