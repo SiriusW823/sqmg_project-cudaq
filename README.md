@@ -108,7 +108,7 @@ RR-QPSO update.
 > and are retained below.
 >
 > Full study: [`docs/RESULTS.md`](docs/RESULTS.md) ·
-> Data index: [`SQMG/experiments/EXPERIMENTS.md`](SQMG/experiments/EXPERIMENTS.md)
+> Data index: [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md)
 
 All figures below use the 134-parameter, 20-qubit dynamic circuit, CUDA-Q 0.7.1
 (cuStateVec) on NVIDIA V100 GPUs, and report the validity–uniqueness product
@@ -363,7 +363,7 @@ and confirmatory experiments.
 
 360 runs across seven experiments. Raw per-evaluation CSVs, best parameter
 vectors and summaries are indexed in
-[`SQMG/experiments/EXPERIMENTS.md`](SQMG/experiments/EXPERIMENTS.md) with SHA-256
+[`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) with SHA-256
 manifests; every figure and statistic is regenerated from those CSVs by
 `SQMG/scripts/make_figures.sh` into `figures_method/stats*.json`, and the
 documents are cross-checked against that JSON by
@@ -485,8 +485,11 @@ sqmg_project-cudaq/
 │  ── Hardware / documentation / data ────────────────────────────────────
 ├── run_iqm_qpu.py                           ← IQM Resonance feasibility analysis (see note below)
 ├── docs/
-│   ├── RESULTS.md                              ★ methodological study: five experiments, full statistics
+│   ├── RESULTS.md                              ★ methodological study: full narrative and statistics
+│   ├── EXPERIMENTS.md                          ★ index of all 360 runs: what each dataset is, how to reproduce
+│   ├── CLUSTER.md                              partitions, time limits, node quirks, chained long jobs
 │   ├── PREREGISTRATION_ablation_confirmatory.md   analysis plan, committed before the data
+│   ├── PREREGISTRATION_cmaes_confirmatory.md      analysis plan, committed before the data
 │   ├── STRUCTURE.md                            architecture cheat-sheet
 │   ├── EXPERIMENT_DESIGN.md                    fair-comparison protocol and statistical plan
 │   └── *.TEMPLATE.log                          reference log format
