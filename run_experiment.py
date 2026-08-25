@@ -114,6 +114,17 @@ def parse_args():
                    help="QPSO / RR-QPSO 的收縮擴張係數上界（不指定則用各自預設）")
     p.add_argument("--alpha_min", type=float, default=None,
                    help="QPSO / RR-QPSO 的收縮擴張係數下界（不指定則用各自預設）")
+    # ── BO 的 GP 訓練點上限 ────────────────────────────────────────────
+    #   預設 400 是為了讓 BO 在牆鐘內跑完（GP 是 O(n³)），但在大預算下
+    #   會讓 GP 看不到絕大多數觀測：9,664 次評估時被丟掉約 96%。
+    #   實測 BO 在 1,984→9,664 只進步 +0.0300，停滯很可能就來自這個上限，
+    #   而不是 BO 本身的性質。開成參數以便驗證：把它設得 >= max_evals
+    #   等於不設限，可用來區分「BO 的極限」與「我們的實作限制」。
+    p.add_argument("--max_gp_points", type=int, default=None,
+                   help="BO / Batch BO 的 GP 訓練點數上限（預設 400；"
+                        "設為 >= max_evals 等於不設限）")
+    p.add_argument("--tune_every", type=int, default=None,
+                   help="BO 超參數重調頻率（預設每 25 次迭代）")
     p.add_argument("--ablate", type=str, default=None,
                    choices=["none", "sobol", "obl", "ae", "vu", "mc"],
                    help="RR-QPSO 組件消融：關閉指定的單一組件。"
@@ -214,7 +225,9 @@ def main() -> None:
     extra = {}
     accepted = inspect.signature(cls.__init__).parameters
     for k, v in (("alpha_max", args.alpha_max), ("alpha_min", args.alpha_min),
-                 ("ablate", args.ablate)):
+                 ("ablate", args.ablate),
+                 ("max_gp_points", args.max_gp_points),
+                 ("tune_every", args.tune_every)):
         if v is not None and k in accepted:
             extra[k] = v
     if extra:

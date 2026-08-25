@@ -44,6 +44,8 @@ EXTRA=""
 [ -n "${ALPHA_MIN:-}" ]  && EXTRA="$EXTRA --alpha_min $ALPHA_MIN"
 [ -n "${SHOT_SEED:-}" ]  && EXTRA="$EXTRA --shot_seed $SHOT_SEED"
 [ -n "${ABLATE:-}" ]     && EXTRA="$EXTRA --ablate $ABLATE"
+[ -n "${MAX_GP_POINTS:-}" ] && EXTRA="$EXTRA --max_gp_points $MAX_GP_POINTS"
+[ -n "${TUNE_EVERY:-}" ]    && EXTRA="$EXTRA --tune_every $TUNE_EVERY"
 
 echo "=== benchmark start $(date) ==="
 echo "  job=$SLURM_JOB_ID nodes=$SLURM_NNODES nodelist=$SLURM_NODELIST"
