@@ -94,44 +94,188 @@ RR-QPSO update.
 
 ---
 
-> ### ⚠ These results are under revision
->
-> The numbers below come from **single runs (n = 1)**. A subsequent methodological
-> study with paired designs and 10–30 seeds per configuration splits cleanly in two.
->
-> **Confirmed, and stronger than reported.** Population-based optimization
-> decisively beats Bayesian optimization: both QPSO and RR-QPSO win **10/10**
-> paired seeds against BO, Cliff's δ = **+1.000** (complete separation),
-> Friedman p = 0.00002.
->
-> **Not confirmed.** RR-QPSO is **statistically equivalent** to plain QPSO at the
-> same budget (TOST at ±0.02, p = 0.0011), and no individual RR-QPSO component
-> survives an out-of-sample confirmatory ablation. The selection bias from shot
-> noise in a single run was measured at **+0.011 to +0.027 in V×U** — larger than
-> two of the three differences reported below.
->
-> See [`docs/RESULTS.md`](docs/RESULTS.md) for the full study.
+## Results
 
-## Results (9-heavy-atom benchmark)
+> ### ⚠ Status: the optimizer comparison has been superseded
+>
+> The original optimizer comparison (§ "Superseded single-run results" below)
+> rested on **single runs, n = 1**. A subsequent methodological study — **360 runs
+> across seven experiments**, paired designs, 5–30 seeds per configuration — does
+> not reproduce its central claim. Two of the three differences it reported are
+> smaller than the measured shot-noise selection bias.
+>
+> The particle-count sweep and the multi-objective results are **not** affected
+> and are retained below.
+>
+> Full study: [`docs/RESULTS.md`](docs/RESULTS.md) ·
+> Data index: [`SQMG/experiments/EXPERIMENTS.md`](SQMG/experiments/EXPERIMENTS.md)
 
-All runs use the 134-parameter, 20-qubit dynamic circuit, CUDA-Q 0.7.1
-(cuStateVec) on NVIDIA V100 GPUs, 5000 shots per evaluation unless noted, and
-report the validity–uniqueness product `V × U`.
+All figures below use the 134-parameter, 20-qubit dynamic circuit, CUDA-Q 0.7.1
+(cuStateVec) on NVIDIA V100 GPUs, and report the validity–uniqueness product
+`V × U`. **Shot count matters for cross-study comparison** — see the caveat at
+the end of this section.
 
-### Optimizer comparison — Fig. 2 (M = 64, T = 150)
+### Optimizer comparison — eight algorithms
+
+M = 64, 9,664 objective evaluations (T = 150), 1,000 shots, n = 5 paired seeds.
+Every optimizer is held to an identical evaluation budget by
+`optimizers/base.py`, and every seed fixes both the optimizer RNG and the shot
+RNG, so comparisons are paired.
+
+| Rank | Optimizer | Median V×U | SD | Mean rank |
+|---|---|---|---|---|
+| 1 | **QPSO** | **0.9750** | 0.0096 | 1.40 |
+| 2 | **CMA-ES** | **0.9710** | 0.0055 | 2.00 |
+| 3 | RR-QPSO (this work) | 0.9640 | 0.0169 | 2.80 |
+| 4 | Differential Evolution | 0.9160 | 0.0187 | 3.80 |
+| 5 | SPSA | 0.7190 | 0.0143 | 5.00 |
+| 6 | Batch BO | 0.6950 | 0.0168 | 6.00 |
+| 7 | Sobol random search | 0.5700 | 0.0318 | 7.00 |
+| — | Bayesian Optimization † | 0.6925 | 0.0139 | — |
+
+Friedman χ² = 28.114, **p = 0.00009** — the algorithms differ.
+
+† BO was capped at 2,000 evaluations in this batch (sequential BO cannot reach
+9,664 within the wall clock); the full-budget figure comes from a separate n = 10
+run. In the same batch at 2,000 evaluations BO reaches 0.6700.
+
+Two results carry the weight here:
+
+- **Population-based optimization decisively beats Bayesian optimization.** At a
+  matched budget, QPSO and RR-QPSO each win **10/10** paired seeds against BO
+  (Cliff's δ = **+1.000**, complete separation; p_holm = 0.0039 at full budget,
+  Friedman p = 0.00002 in the dedicated n = 10 batch). The gap widens with budget:
+  BO leads below ~500 evaluations, then plateaus at 0.6925 while the population
+  methods continue to 0.97.
+- **CMA-ES matches RR-QPSO** (Δ = −0.0010, RR winning 1/5) at roughly one third
+  the spread (SD 0.0055 vs 0.0169). CMA-ES contains no quantum-inspired
+  component. A confirmatory test of this comparison at n = 10 on held-out seeds is
+  currently running.
+
+Sobol random search finishing last is the intended sanity check on the harness.
+
+**Power limitation.** At n = 5 the smallest attainable paired-Wilcoxon p is
+0.0625, and 0.4375 after Holm correction across seven comparisons — pairwise
+significance is structurally unreachable in this batch. The omnibus Friedman test
+is unaffected. QPSO, RR-QPSO and BO were therefore re-tested at n = 10; see below.
+
+### RR-QPSO versus plain QPSO — equivalence at the paper's budget
+
+M = 64, 9,664 evaluations, 1,000 shots, **n = 10 paired seeds**, α aligned to
+[0.3, 1.2] for both arms.
+
+| | Median | Mean | SD |
+|---|---|---|---|
+| QPSO | 0.9720 | 0.9689 | 0.0187 |
+| RR-QPSO | 0.9655 | 0.9630 | 0.0193 |
+
+| Statistic | Value |
+|---|---|
+| Δ (RR − QPSO), median | **−0.0080** |
+| 95% bootstrap CI | [−0.0160, +0.0040] |
+| RR-QPSO wins | 3 / 10 |
+| Paired Wilcoxon | p = 0.1211 |
+| Cliff's δ / Cohen's d_z | −0.21 / −0.56 |
+| **TOST, ±0.02** | **p = 0.0011 → equivalent** |
+| TOST, ±0.01 | p = 0.1250 |
+| SD ratio (RR / QPSO) | 1.03 (Fligner–Killeen p = 0.589) |
+
+![Long-horizon comparison](figures_method/fig_m1_longhorizon.png)
+
+This is a **positive equivalence result**, not a failure to detect a difference:
+TOST rejects the hypothesis that the two differ by more than ±0.02. The
+stability claim is likewise not supported — the two have effectively identical
+variance.
+
+At intermediate budgets RR-QPSO is significantly **worse**: at 4,000 and 5,000
+evaluations it loses 0/10 with Holm-corrected p = 0.018 and Cliff's δ ≈ −0.77.
+The shape is mechanistically coherent — OBL, rank-refined mean-best and
+mode-collapse reinitialization all spend budget on exploration, delaying
+convergence without a compensating gain once both methods approach the ceiling.
+
+### Component ablation
+
+Each RR-QPSO component was disabled one at a time (M = 64, 1,984 evaluations,
+α aligned).
+
+**Pilot, n = 10** — Friedman **p = 0.2969**; RR-QPSO vs plain QPSO Δ = −0.0200
+(p = 0.7695).
+
+| Component removed | Δ median | Wins | 95% CI | d_z |
+|---|---|---|---|---|
+| OBL | +0.0250 | 7/10 | [−0.0250, +0.0485] | 0.513 |
+| V–U decoupling | +0.0170 | 7/10 | [−0.0070, +0.0335] | 0.191 |
+| AE-weighted mbest | +0.0130 | 8/10 | [−0.0055, +0.0270] | 0.538 |
+| Sobol initialization | +0.0100 | 7/10 | [−0.0110, +0.0250] | 0.344 |
+| Mode-collapse recovery | +0.0060 | 6/10 | [−0.0140, +0.0270] | 0.176 |
+
+![Ablation forest plot](figures_method/fig_m2_ablation_forest.png)
+
+All five point estimates favour keeping the component, but every CI crosses zero
+and an aggregate sign-flip permutation test gives p = 0.0814. The pilot is
+**underpowered, not null**.
+
+**Confirmatory, n = 30 on held-out seeds** — pre-registered in
+[`docs/PREREGISTRATION_ablation_confirmatory.md`](docs/PREREGISTRATION_ablation_confirmatory.md),
+committed before the data existed. The two components reachable at feasible cost
+were tested:
+
+| Hypothesis | Δ median | Wins | p | **p_holm** | Result |
+|---|---|---|---|---|---|
+| OBL contributes | +0.0025 | **15/30** | 0.131 | **0.131** | not supported |
+| AE mbest contributes | +0.0110 | 18/30 | 0.038 | **0.075** | not supported |
+
+Effect sizes shrank on held-out seeds — a direct measurement of the winner's
+curse:
+
+| Component | Pilot d_z | Confirmatory d_z | Shrinkage | n for 80% power |
+|---|---|---|---|---|
+| OBL | 0.513 | 0.342 | ×0.67 | 68 |
+| AE mbest | 0.538 | 0.297 | ×0.55 | 89 |
+
+![Effect-size shrinkage](figures_method/fig_m3_shrinkage.png)
+
+Had the pilot simply been extended from n = 10 to n = 30 on the *same* seeds,
+AE mbest would almost certainly have reached significance — a false positive.
+Using fresh seeds is what prevented it.
+
+### Measurement noise and the reliability of single-run comparisons
+
+Five fixed parameter vectors were each re-evaluated with 24 independent shot
+seeds. All five showed the same directional bias: the value obtained with the
+default `random_seed = 0` sat near the maximum of its 24 draws (z = +2.9 to
++3.8), inflating the reported figure by **+0.011 to +0.027 in V×U**.
+
+This is intrinsic to reporting a maximum over noisy evaluations — the selected
+candidate is chosen partly for being genuinely good and partly for a lucky draw,
+and a single run cannot separate the two.
+
+![Noise versus claimed differences](figures_method/fig_m4_noise_vs_claims.png)
+
+| Originally claimed difference | Value | Inside the noise band? |
+|---|---|---|
+| RR-QPSO vs QPSO + Sobol | 0.016 | **yes** |
+| QPSO + Sobol vs QPSO | 0.009 | at the lower edge |
+| RR-QPSO vs BO | 0.028 | no — just above |
+
+The two differences that fall inside the band did not replicate under paired
+testing. The one that exceeded it did. The noise analysis predicted which claim
+would survive, which is the strongest available evidence that the band is
+calibrated.
+
+### Superseded single-run results
+
+Retained for provenance. **These are n = 1 and should not be cited as evidence
+of an ordering** — see the paired results above.
 
 | Optimizer | V (%) | U (%) | V × U (%) |
 |---|---|---|---|
 | BO (re-run baseline) | 94.2 | 95.7 | 90.2 |
 | QPSO (no Sobol init) | — | — | 90.5 |
 | QPSO + Sobol init | — | — | 91.4 |
-| **RR-QPSO (this work)** | **95.9** | **97.0** | **93.0** |
+| RR-QPSO (this work) | 95.9 | 97.0 | 93.0 |
 
-![Fig. 2 — optimizer comparison](figures/fig2_VU_bars.png)
-
-Adding Sobol init alone lifts the product modestly (91.4%); the larger gain
-comes from combining rank-refined mean-best guidance with fitness-guided
-refinement.
+![Fig. 2 — original optimizer comparison](figures/fig2_VU_bars.png)
 
 ### Effect of particle count — Fig. 3 / Table I (T = 150)
 
@@ -167,7 +311,95 @@ C_prop = exp( −0.5 [ ((H̄_HBA − 4)/σ)^2 + ((H̄_HBD − 3)/σ)^2 ] ),  σ 
 ![Fig. 4 — multi-objective HBA/HBD](figures/fig4_hbahbd_compare.png)
 
 Both optimizers steer mean HBA/HBD near the target region, but RR-QPSO retains a
-substantially higher V × U under the added property constraint.
+substantially higher V × U under the added property constraint. This comparison
+is n = 1 and has not been re-tested; the constrained landscape is more rugged
+than the unconstrained one, so it is the setting where the exploration mechanisms
+are most likely to pay off, but that remains untested.
+
+### Threats to validity
+
+**1. The BO baseline may be too weak (open).** The published comparison used
+[PEESEgroup/QMG](https://github.com/PEESEgroup/QMG), whose BO is Meta's
+Ax/BoTorch `Models.GPEI`. This repository's `optimizers/bayesopt.py` differs
+systematically, and every difference favours the reference implementation:
+
+| | Ax / BoTorch | This repository |
+|---|---|---|
+| Kernel | **ARD** Matérn 5/2 (per-dimension length scales) | **isotropic** Matérn |
+| GP training points | all observations | capped at 400 |
+| Sobol initialization | 5 trials | 128 |
+| Acceleration | GPU | CPU |
+
+At D = 134, an isotropic kernel asserts that all 134 parameters have equal
+sensitivity, and this is the most likely reason BO here plateaus at 0.69 while
+the reference implementation reaches 0.90. A controlled test showed the training
+cap is **not** the main cause — removing it entirely (`max_gp_points` 400 → 2000)
+moved the median only +0.0125 (5/10, p = 0.156), against a gap of +0.217. The
+kernel remains the prime suspect. **Until BO is re-run with Ax/BoTorch, the
+population-vs-BO margin should be read as directional, not quantitative.**
+
+**2. Shot counts are not comparable across studies.** Uniqueness is defined as
+`distinct molecules / valid molecules`. As shots increase, the denominator grows
+roughly linearly while the numerator saturates, so **V×U falls as shots rise**.
+This work uses 1,000 shots; the upstream default is 10,000 and the published
+figures use 5,000. The V×U ≈ 0.97 reported here is therefore *not* evidence of a
+better optimizer than the published 0.930 — it largely reflects fewer shots.
+Comparisons are only valid within a fixed shot count.
+
+**3. Ceiling effects.** At 1,000 shots both QPSO variants approach the attainable
+maximum (≈ 0.97), which may compress the difference between them. Re-running at
+5,000 shots would take roughly 7 days and has not been done.
+
+**4. A single problem instance.** All conclusions are limited to the 9-heavy-atom
+unconditional V×U objective at M = 64.
+
+**5. Implementation defect found mid-study.** Sobol initialization lives in the
+legacy runner, not in `AESOQPSOOptimizer`; the v12 wrapper omitted it, so every
+RR-QPSO run prior to the ablation experiment lacked Sobol initialization — one of
+the method's four claimed contributions. This was corrected before the ablation
+and confirmatory experiments.
+
+### Experimental record
+
+360 runs across seven experiments. Raw per-evaluation CSVs, best parameter
+vectors and summaries are indexed in
+[`SQMG/experiments/EXPERIMENTS.md`](SQMG/experiments/EXPERIMENTS.md) with SHA-256
+manifests; every figure and statistic is regenerated from those CSVs by
+`SQMG/scripts/make_figures.sh` into `figures_method/stats*.json`, and the
+documents are cross-checked against that JSON by
+`SQMG/tools/verify_results_doc.py`.
+
+| # | Experiment | Design | Runs | Outcome |
+|---|---|---|---|---|
+| 0 | Eight-algorithm comparison | 8 × 5 seeds, 9,664 evals | 40 | QPSO > CMA-ES > RR-QPSO > DE ≫ BO variants > Sobol |
+| 1 | α-schedule alignment | 4 × 10 seeds | 40 | α was a confound; QPSO leads at every budget once aligned |
+| 2 | Long-horizon comparison | 2 × 10 seeds, 9,664 evals | 20 | RR-QPSO ≡ QPSO (TOST ±0.02, p = 0.0011) |
+| 3 | Component ablation (pilot) | 7 × 10 seeds | 70 | Friedman p = 0.297; underpowered |
+| 4 | Confirmatory ablation | 3 × 30 held-out seeds | 90 | Both hypotheses null; effect sizes ×0.55–0.67 |
+| 5 | Shot-noise selection bias | 5 vectors × 24 shot seeds | — | +0.011 to +0.027 inflation |
+| 6 | BO comparison | 4 × 10 + 20 seeds | 60 | Population methods win 10/10, δ = +1.000 |
+| 7 | CMA-ES confirmatory | 3 × 10 held-out seeds | 30 | **running** — pre-registered |
+
+Pre-registrations for experiments 4 and 7 were committed to git before their data
+existed; the commit timestamps are the record.
+
+### Interpretation
+
+The evidence separates into two layers.
+
+**The choice of optimizer family matters.** Population-based methods separate
+completely from Bayesian optimization on this problem (δ = +1.000). The most
+fundamental design decision in the original work — replacing BO with a
+population-based optimizer — is supported far more strongly than the single-run
+comparison indicated, subject to threat 1 above.
+
+**Refinements within that family do not.** RR-QPSO is equivalent to plain QPSO,
+no individual component survives out-of-sample confirmation, and a conventional
+evolution strategy (CMA-ES) matches RR-QPSO at a third of the variance. Three
+independent experiments reach this conclusion from different directions.
+
+These are separate claims about different comparisons and should be reported
+separately.
 
 ---
 
