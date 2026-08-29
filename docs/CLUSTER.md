@@ -148,6 +148,47 @@ statistical one).
 
 ---
 
+## Keeping the cluster copy current
+
+The cluster working directory is a git clone of this repository. **Update it with
+`git pull`, not by copying selected files.**
+
+```bash
+cd ~/sqmg_project-cudaq && git pull --ff-only origin main
+```
+
+A hand-maintained list of "files to sync" will eventually omit one. It did:
+`evaluator.py` was missing from the list, so a fix that was correct locally was
+absent on the cluster, and an experiment ran against the old code. `git pull`
+does not have that failure mode.
+
+Two things make this safe while jobs are running:
+
+- Every `results*/` directory is git-ignored, so `git pull` and even
+  `git reset --hard` cannot touch experiment data. Verify with
+  `git check-ignore -q results_xxx` before any reset.
+- Never use `git clean -fdx`. The `-x` flag removes ignored files, which is
+  precisely the experiment data. `git clean -fd` is safe.
+- Running processes have already imported their modules, so changing files
+  underneath them has no effect on jobs in flight. Newly spawned workers pick up
+  the new code, which is normally what you want.
+
+If `git pull` refuses because an untracked file would be overwritten, compare it
+against the incoming version before deleting it:
+
+```bash
+sha256sum path/to/file
+git show origin/main:path/to/file | sha256sum
+```
+
+Three-way agreement between the local machine, the cluster and GitHub can be
+checked with `SQMG/tools/sync_three_way.py`, which normalises line endings before
+hashing. Include `.json` in whatever you compare — the statistics files are the
+sole source of the numbers in the documents, and omitting them once let the
+cluster sit a commit behind while the check reported "synchronised".
+
+---
+
 ## Monitoring
 
 Report evaluation counts and node throughput, not fitness values, while a
