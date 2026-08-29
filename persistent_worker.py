@@ -107,7 +107,12 @@ def main() -> None:
             smiles_dict, validity, uniqueness = gen.sample_molecule(
                 args.num_sample, random_seed=int(task.get("seed", 0)))
 
-            hba = hbd = 0.0
+            # ★ 區分「沒有能力算」與「算出來是 0」：
+            #   未傳 --report_hbahbd 時寫 NaN 而非 0.0。寫 0.0 會讓陣列長度
+            #   仍是 4、通過下游的長度檢查，而 fitness 悄悄退化成 V×U 的
+            #   常數縮放——這正是 hbahbd 目標曾經整批作廢的原因。
+            #   NaN 會在 fitness 端被明確拒絕。
+            hba = hbd = float("nan")
             if compute_mean_hba_hbd is not None:
                 hba, hbd = compute_mean_hba_hbd(smiles_dict)
 

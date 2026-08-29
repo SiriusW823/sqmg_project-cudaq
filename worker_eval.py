@@ -159,7 +159,10 @@ def main():
         smiles_dict, validity, uniqueness = gen.sample_molecule(args.num_sample)
 
         # ★ v10.4：opt-in HBA/HBD 量測（不影響 V×U 目標與 QPSO 演算法）
-        hba_mean, hbd_mean = (0.0, 0.0)
+        #   未開啟時寫 NaN 而非 0.0：0.0 是「合法的量測值」，會讓需要 HBA/HBD
+        #   的目標函數靜默退化而不報錯（hbahbd 目標曾因此整批作廢）。
+        #   NaN 表示「沒有這個量測」，由 fitness 端明確拒絕。
+        hba_mean, hbd_mean = (float("nan"), float("nan"))
         if args.report_hbahbd:
             hba_mean, hbd_mean = compute_mean_hba_hbd(smiles_dict)
 

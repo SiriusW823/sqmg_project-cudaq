@@ -178,10 +178,13 @@ def make_pooled_evaluator(
     n = len(gpu_ids)
     tmpdir = tempfile.gettempdir()
 
-    def batch_evaluate(positions: np.ndarray) -> List[Tuple[float, float]]:
+    def batch_evaluate(positions: np.ndarray) -> List[Tuple[float, ...]]:
         M = positions.shape[0]
-        out: List[Tuple[float, float]] = [(0.0, 0.0)] * M
+        # (V, U, HBA, HBD)；缺件時的預設值，供容錯路徑使用
+        out: List[Tuple[float, ...]] = [(0.0, 0.0, 0.0, 0.0)] * M
         t0 = time.time()
+        lost = short = 0
+        first_err = None
         pool.ensure()
 
         for start in range(0, M, n):
@@ -204,8 +207,14 @@ def make_pooled_evaluator(
                     #   使得 hbahbd 目標永遠拿不到 HBA/HBD（fitness 退化為
                     #   V×U×0.6 的常數縮放），且不會報錯。全部帶回。
                     out[pidx] = tuple(float(x) for x in arr[:4])
-                except Exception:
-                    pass
+                    if len(arr) < 4:
+                        short += 1
+                except Exception as e:                      # noqa: BLE001
+                    # 退化為 (0,0,0,0) 是既定的容錯語意，但必須留下痕跡：
+                    # 否則「worker 算出 0」與「結果檔不存在」無法區分。
+                    lost += 1
+                    if first_err is None:
+                        first_err = f"{type(e).__name__}: {str(e)[:120]}"
                 for q in (wpath, rpath):
                     try:
                         os.remove(q)
@@ -217,6 +226,12 @@ def make_pooled_evaluator(
         dt = time.time() - t0
         logger.info(f"  [pool] 批次 {M} 個粒子（{n} workers）有效 {valid}/{M}  "
                     f"耗時 {dt:.1f}s  ({dt/max(M,1):.1f} s/eval)")
+        if lost:
+            logger.warning(f"  [pool] {lost}/{M} 個粒子的結果檔讀取失敗，"
+                           f"以 0 計入。首個錯誤：{first_err}")
+        if short:
+            logger.warning(f"  [pool] {short}/{M} 個結果少於 4 個欄位；"
+                           f"hbahbd 目標會因此失效（需 V,U,HBA,HBD）。")
         return out
 
     return batch_evaluate
@@ -241,7 +256,7 @@ def make_local_evaluator(
 
     def batch_evaluate(positions: np.ndarray) -> List[Tuple[float, float]]:
         M = positions.shape[0]
-        out: List[Tuple[float, float]] = [(0.0, 0.0)] * M
+        out: List[Tuple[float, ...]] = [(0.0, 0.0, 0.0, 0.0)] * M   # V,U,HBA,HBD
         t0 = time.time()
 
         for start in range(0, M, n_gpus):
@@ -368,7 +383,7 @@ def make_slurm_evaluator(
 
     def batch_evaluate(positions: np.ndarray) -> List[Tuple[float, float]]:
         M = positions.shape[0]
-        out: List[Tuple[float, float]] = [(0.0, 0.0)] * M
+        out: List[Tuple[float, ...]] = [(0.0, 0.0, 0.0, 0.0)] * M   # V,U,HBA,HBD
         t0 = time.time()
 
         for start in range(0, M, G):

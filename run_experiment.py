@@ -81,6 +81,17 @@ def make_fitness_fn(args):
                     "若容忍此情況，fitness 會退化為 V×U 的常數縮放而不報錯。")
             return 0.0
         hba, hbd = float(metrics[2]), float(metrics[3])
+        # NaN 代表 worker 沒有被要求量測 HBA/HBD（未傳 --report_hbahbd）。
+        # 這是設定錯誤，不是評估失敗——必須顯著中止，否則 fitness 會退化為
+        # V×U 的常數縮放。評估真的失敗時 worker 寫的是 0.0，V×U 自然為 0。
+        if np.isnan(hba) or np.isnan(hbd):
+            seen_short["n"] += 1
+            if seen_short["n"] == 1:
+                raise RuntimeError(
+                    "hbahbd 目標收到 HBA/HBD = NaN，代表 worker 未被要求量測"
+                    "（--report_hbahbd 沒有傳到）。請檢查評估器的 report_hbahbd "
+                    "是否隨 --objective hbahbd 一併設定。")
+            return 0.0
         closeness = np.exp(-0.5 * (((abs(hba - hba_t) / hs) ** 2)
                                    + ((abs(hbd - hbd_t) / ds) ** 2)))
         return (v * u) * ((1.0 - w) + w * closeness)
