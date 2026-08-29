@@ -5,6 +5,35 @@ The git commit of this file timestamps the analysis plan.
 
 ---
 
+> ## Run 1 voided — implementation defect, not an unwelcome result
+>
+> The first execution of this plan (30 runs, `results_hbahbd_cmp/`, completed
+> 2026-08-29) is **void**. `--objective hbahbd` did not compute the property term.
+>
+> `evaluator.py` returned `(V, U)` from the worker's `[V, U, HBA, HBD]` result
+> file across all three dispatch paths, so `make_fitness_fn` always received a
+> 2-element tuple and silently substituted `hba = hbd = 0.0`, giving
+> `C_prop = exp(-12.5) ≈ 3.7e-6`. The fitness was therefore
+> `V × U × 0.6` — a constant rescaling of the unconditional objective.
+> That batch measured the same thing the V×U experiments already measured.
+>
+> **How it was caught.** §4.4 of this plan requires reporting the HBA/HBD of the
+> best solution to confirm that any gain is not obtained by ignoring the
+> constraint. The recovered `C_prop` was exactly 0.0000 in all 30 runs — not
+> approximately zero — which is only possible if the term never varied. Without
+> that pre-registered check the batch would have been reported as a clean null.
+>
+> **Fix** (commit recorded below): all three paths in `evaluator.py` now pass the
+> full `(V, U, HBA, HBD)` tuple, and `make_fitness_fn` raises rather than
+> defaulting when the tuple is short. Verified by smoke test: `C_prop` now ranges
+> over [0.0000, 0.4649] instead of being pinned at zero.
+>
+> **Nothing in the hypotheses, endpoints, or decision rules below is changed.**
+> Run 2 executes the identical plan on the corrected code, into
+> `results_hbahbd_cmp2/`. The voided batch is retained as evidence of the defect.
+
+---
+
 ## 1. Background and motivation
 
 Across five experiments on the unconditional V×U objective, RR-QPSO shows no

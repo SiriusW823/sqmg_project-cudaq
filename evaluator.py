@@ -200,7 +200,10 @@ def make_pooled_evaluator(
             for pidx, wpath, rpath in paths:
                 try:
                     arr = np.load(rpath)
-                    out[pidx] = (float(arr[0]), float(arr[1]))
+                    # ★ worker 寫出的是 [V, U, HBA, HBD]。此處原本只取前兩個，
+                    #   使得 hbahbd 目標永遠拿不到 HBA/HBD（fitness 退化為
+                    #   V×U×0.6 的常數縮放），且不會報錯。全部帶回。
+                    out[pidx] = tuple(float(x) for x in arr[:4])
                 except Exception:
                     pass
                 for q in (wpath, rpath):
@@ -209,7 +212,8 @@ def make_pooled_evaluator(
                     except FileNotFoundError:
                         pass
 
-        valid = sum(1 for v, _ in out if v > 0)
+        # 用索引而非解包：結果現在是 (V, U, HBA, HBD) 四元組
+        valid = sum(1 for m in out if m[0] > 0)
         dt = time.time() - t0
         logger.info(f"  [pool] 批次 {M} 個粒子（{n} workers）有效 {valid}/{M}  "
                     f"耗時 {dt:.1f}s  ({dt/max(M,1):.1f} s/eval)")
@@ -270,7 +274,7 @@ def make_local_evaluator(
                     _, err = proc.communicate(timeout=timeout)
                     if proc.returncode == 0:
                         arr = np.load(rpath)
-                        out[pidx] = (float(arr[0]), float(arr[1]))
+                        out[pidx] = tuple(float(x) for x in arr[:4])   # [V,U,HBA,HBD]
                     else:
                         logger.warning(
                             f"[local] 粒子 {pidx} exit={proc.returncode}: "
@@ -402,7 +406,7 @@ def make_slurm_evaluator(
             for pidx in ids:
                 try:
                     arr = np.load(os.path.join(rdir, f"r_{pidx}.npy"))
-                    out[pidx] = (float(arr[0]), float(arr[1]))
+                    out[pidx] = tuple(float(x) for x in arr[:4])       # [V,U,HBA,HBD]
                 except Exception as e:                       # noqa: BLE001
                     logger.warning(f"[slurm] 粒子 {pidx} 結果讀取失敗：{e}")
 
@@ -411,7 +415,8 @@ def make_slurm_evaluator(
             except OSError:
                 pass
 
-        valid = sum(1 for v, _ in out if v > 0)
+        # 用索引而非解包：結果現在是 (V, U, HBA, HBD) 四元組
+        valid = sum(1 for m in out if m[0] > 0)
         logger.info(
             f"  [slurm] 批次 {M} 個粒子（{nodes}×{gpus_per_node}={G} 並行）"
             f"有效 {valid}/{M}  耗時 {time.time()-t0:.1f}s")

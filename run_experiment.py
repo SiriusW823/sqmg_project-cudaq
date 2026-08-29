@@ -64,10 +64,23 @@ def make_fitness_fn(args):
     w, hs, ds = args.chem_weight, args.hba_sigma, args.hbd_sigma
     hba_t, hbd_t = args.hba_target, args.hbd_target
 
+    seen_short = {"n": 0}
+
     def fitness(metrics):
         v, u = float(metrics[0]), float(metrics[1])
-        hba = float(metrics[2]) if len(metrics) > 2 else 0.0
-        hbd = float(metrics[3]) if len(metrics) > 3 else 0.0
+        # ★ 過去這裡在 metrics 缺少 HBA/HBD 時默默填 0.0，
+        #   使 closeness = exp(-12.5) ≈ 0，fitness 退化為 V×U×(1-w) 的常數縮放——
+        #   看起來完全正常，但約束項從未參與搜尋。evaluator 曾把結果截斷成
+        #   (V, U) 導致此情況，且整批實驗因此作廢。現在改為顯著失敗。
+        if len(metrics) < 4:
+            seen_short["n"] += 1
+            if seen_short["n"] == 1:
+                raise RuntimeError(
+                    "hbahbd 目標需要 metrics=(V, U, HBA, HBD)，但只收到 "
+                    f"{len(metrics)} 個值。評估器沒有把 HBA/HBD 帶回來；"
+                    "若容忍此情況，fitness 會退化為 V×U 的常數縮放而不報錯。")
+            return 0.0
+        hba, hbd = float(metrics[2]), float(metrics[3])
         closeness = np.exp(-0.5 * (((abs(hba - hba_t) / hs) ** 2)
                                    + ((abs(hbd - hbd_t) / ds) ** 2)))
         return (v * u) * ((1.0 - w) + w * closeness)
