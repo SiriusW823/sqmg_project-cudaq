@@ -378,27 +378,63 @@ documents are cross-checked against that JSON by
 | 4 | Confirmatory ablation | 3 × 30 held-out seeds | 90 | Both hypotheses null; effect sizes ×0.55–0.67 |
 | 5 | Shot-noise selection bias | 5 vectors × 24 shot seeds | — | +0.011 to +0.027 inflation |
 | 6 | BO comparison | 4 × 10 + 20 seeds | 60 | Population methods win 10/10, δ = +1.000 |
-| 7 | CMA-ES confirmatory | 3 × 10 held-out seeds | 30 | **running** — pre-registered |
+| 7 | CMA-ES confirmatory | 3 × 10 held-out seeds | 30 | Inconclusive; Friedman p = 0.0247 ranks RR-QPSO last |
+| 8 | Constrained objective | 3 × 10 seeds | 30 | H1 null (p = 0.080); **H2 supported**: RR-QPSO > CMA-ES, δ = +0.940 |
+| 9 | H1 replication at adequate power | 2 × 45 held-out seeds | 90 | **running** — pre-registered |
 
 Pre-registrations for experiments 4 and 7 were committed to git before their data
 existed; the commit timestamps are the record.
 
 ### Interpretation
 
-The evidence separates into two layers.
+The evidence separates into three layers, and the claim that survives is
+narrower — but better supported — than the original one.
 
-**The choice of optimizer family matters.** Population-based methods separate
-completely from Bayesian optimization on this problem (δ = +1.000). The most
-fundamental design decision in the original work — replacing BO with a
-population-based optimizer — is supported far more strongly than the single-run
-comparison indicated, subject to threat 1 above.
+**Layer 1 — the choice of optimizer family matters, decisively.**
+Population-based methods separate completely from Bayesian optimization
+(Cliff's δ = **+1.000**, 10/10 paired seeds, p_holm = 0.0039). Replacing BO with
+a population-based optimizer was the right call, and the evidence for it is far
+stronger than the original single-run comparison indicated — subject to threat 1
+below.
 
-**Refinements within that family do not.** RR-QPSO is equivalent to plain QPSO,
-no individual component survives out-of-sample confirmation, and a conventional
-evolution strategy (CMA-ES) matches RR-QPSO at a third of the variance. Three
-independent experiments reach this conclusion from different directions.
+**Layer 2 — on the unconstrained objective, refinements within that family do
+not.** Pooling every full-budget run under identical settings (n = 20), RR-QPSO
+is **significantly worse** than plain QPSO: Δ = −0.0090, 95% CI
+[−0.0160, −0.0040] excluding zero, 4/20 wins, p = 0.0152. The effect is small
+(δ = −0.175) but the direction is established. No individual RR-QPSO component
+survives an out-of-sample confirmatory ablation, and CMA-ES — a conventional
+evolution strategy with no quantum-inspired component — matches RR-QPSO here.
 
-These are separate claims about different comparisons and should be reported
+**Layer 3 — on the constrained (HBA/HBD) objective, the ordering changes.**
+RR-QPSO ranks first for the only time in this study (mean rank 1.20 vs QPSO 1.90
+vs CMA-ES 2.90, Friedman p = 0.00068), and a pre-registered hypothesis is
+supported for the first time: **RR-QPSO beats CMA-ES 10/10** with Δ = +0.1346 and
+Cliff's δ = **+0.940** at p_holm = 0.0020.
+
+| Optimizer | Unconstrained V×U | Constrained F_MO |
+|---|---|---|
+| RR-QPSO | 0.9160 | **0.8263** |
+| QPSO | 0.9210 | 0.8152 |
+| CMA-ES | 0.9100 | **0.6870** |
+
+CMA-ES loses 0.22 when the property constraint is added; RR-QPSO loses 0.09.
+A single Gaussian model is drawn into the void between modes on a multimodal
+landscape, where a particle swarm can occupy several at once.
+
+RR-QPSO versus plain QPSO on this objective is **not** established: Δ = +0.0186,
+8/10 wins, p = 0.0801 against a pre-registered α of 0.05, reported as null. The
+interaction test that would show the difference to be objective-specific is also
+not significant (p = 0.4922). Reaching 80% power at the observed d_z = 0.427
+requires n ≈ 43; that is a separate pre-registered study, not an extension of
+this one, and it is currently running.
+
+**The defensible claim, stated with its scope:** *on constrained multi-objective
+molecular generation, the QPSO family outperforms CMA-ES; on the unconstrained
+objective the three are equivalent or favour plain QPSO.* This is narrower than
+"RR-QPSO is better", and unlike that claim it is supported by a pre-registered
+test.
+
+These are separate claims about different comparisons and must be reported
 separately.
 
 ---
