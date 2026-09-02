@@ -239,6 +239,35 @@ Had the pilot simply been extended from n = 10 to n = 30 on the *same* seeds,
 AE mbest would almost certainly have reached significance — a false positive.
 Using fresh seeds is what prevented it.
 
+### What the mechanisms actually do
+
+Every experiment above asks whether RR-QPSO reaches a higher `max V×U`. None asks
+what its mechanisms *do*. Instrumenting the 55 existing paired runs answers that,
+and the answer is consistent across both objectives.
+
+**All three mechanisms fire regularly.** The V–U decoupling term sits at its 0.15
+cap for 50–77% of evaluations; mode-collapse recovery triggers ~179 times per
+long run; stagnation reinitialization ~3 times (and never in the 29-iteration
+constrained runs, where `stagnation_limit = 12` leaves too little room).
+
+**Their measurable effect is broader exploration:**
+
+| | Cells covered in (V,U) space (20×20) | σ_V | σ_U | Evaluations at U < 0.20 |
+|---|---|---|---|---|
+| RR-QPSO | **323.5** / 400 | 0.1995 | 0.2480 | 6.09% |
+| QPSO | 296.0 / 400 | 0.1893 | 0.2282 | 4.60% |
+
+Replicated on the constrained objective (272 vs 247 cells). RR-QPSO covers ~10%
+more of the reachable space and visits more low-quality regions — the cost side
+of the same trade, and the reason the mode-collapse guard exists.
+
+So the mechanisms are not inert; they change search behaviour in exactly the
+direction their design implies. On `max V×U` at a fixed evaluation budget that
+trade is a consistent net loss. Whether the extra breadth buys anything on a
+**set-level** endpoint — the number of distinct molecules a run produces, which
+is what a generator actually delivers — is the subject of the study now running
+(pre-registered, seeds 100–129).
+
 ### Measurement noise and the reliability of single-run comparisons
 
 Five fixed parameter vectors were each re-evaluated with 24 independent shot
@@ -381,9 +410,15 @@ documents are cross-checked against that JSON by
 | 7 | CMA-ES confirmatory | 3 × 10 held-out seeds | 30 | Inconclusive; Friedman p = 0.0247 ranks RR-QPSO last |
 | 8 | Constrained objective | 3 × 10 seeds | 30 | H1 null (p = 0.080); **H2 supported**: RR-QPSO > CMA-ES, δ = +0.940 |
 | 9 | H1 replication at adequate power | 2 × 45 held-out seeds | 90 | Effect **reversed**: d_z +0.427 → −0.312; line of inquiry closed |
+| 10 | Set-level diversity endpoint | 2 × 30 held-out seeds | 60 | **running** — pre-registered, and the last such attempt |
 
-Pre-registrations for experiments 4 and 7 were committed to git before their data
-existed; the commit timestamps are the record.
+Pre-registrations for experiments 4, 7, 8, 9 and 10 were committed to git before
+their data existed; the commit timestamps are the record. Each states its
+hypotheses, endpoint, multiplicity correction and stopping rule in advance, and
+each was honoured — including experiment 8, whose first execution was voided for
+an implementation defect caught by its own mandatory validity check, and
+experiment 9, whose null result closed a line of inquiry rather than prompting
+more seeds.
 
 ### Interpretation
 
@@ -532,10 +567,13 @@ sqmg_project-cudaq/
 ├── run_iqm_qpu.py                           ← IQM Resonance feasibility analysis (see note below)
 ├── docs/
 │   ├── RESULTS.md                              ★ methodological study: full narrative and statistics
-│   ├── EXPERIMENTS.md                          ★ index of all 360 runs: what each dataset is, how to reproduce
+│   ├── EXPERIMENTS.md                          ★ index of all runs: what each dataset is, how to reproduce
 │   ├── CLUSTER.md                              partitions, time limits, node quirks, chained long jobs
-│   ├── PREREGISTRATION_ablation_confirmatory.md   analysis plan, committed before the data
-│   ├── PREREGISTRATION_cmaes_confirmatory.md      analysis plan, committed before the data
+│   ├── PREREGISTRATION_ablation_confirmatory.md   analysis plans, each committed before its data
+│   ├── PREREGISTRATION_cmaes_confirmatory.md
+│   ├── PREREGISTRATION_hbahbd_confirmatory.md
+│   ├── PREREGISTRATION_h1_replication.md
+│   ├── PREREGISTRATION_diversity.md
 │   ├── STRUCTURE.md                            architecture cheat-sheet
 │   ├── EXPERIMENT_DESIGN.md                    fair-comparison protocol and statistical plan
 │   └── *.TEMPLATE.log                          reference log format
