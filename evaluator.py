@@ -60,7 +60,7 @@ class _WorkerPool:
     """
 
     def __init__(self, gpu_ids, logger, num_heavy_atom, num_sample,
-                 backend, report_hbahbd, timeout):
+                 backend, report_hbahbd, timeout, smiles_log_dir=None):
         self.gpu_ids   = [str(g) for g in gpu_ids]
         self.logger    = logger
         self.nha       = num_heavy_atom
@@ -69,6 +69,9 @@ class _WorkerPool:
         self.hbahbd    = report_hbahbd
         self.timeout   = timeout
         self.procs     = [None] * len(self.gpu_ids)
+        # ★ 多樣性研究：每個 worker slot 寫自己的檔，避免並行寫入交錯。
+        #   聯集在分析時跨檔計算，worker 之間不需協調。
+        self.smiles_log_dir = smiles_log_dir
 
     def _spawn(self, i: int):
         env = os.environ.copy()
@@ -82,6 +85,10 @@ class _WorkerPool:
                "--backend", self.backend]
         if self.hbahbd:
             cmd.append("--report_hbahbd")
+        if self.smiles_log_dir:
+            os.makedirs(self.smiles_log_dir, exist_ok=True)
+            cmd += ["--smiles_log",
+                    os.path.join(self.smiles_log_dir, f"slot{i}.smi")]
 
         p = subprocess.Popen(cmd, env=env, cwd=REPO_DIR,
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -165,6 +172,7 @@ def make_pooled_evaluator(
     timeout:        int = 900,
     report_hbahbd:  bool = False,
     shot_seed:      int = 0,
+    smiles_log_dir: str = None,
 ) -> Callable[[np.ndarray], List[Tuple[float, float]]]:
     """
     常駐 worker pool 版的單節點評估器（v12.1 預設）。
@@ -174,7 +182,9 @@ def make_pooled_evaluator(
       - 其他值 ＝ 不同的 shot 序列（用於量測取樣不確定性）
     """
     pool = _WorkerPool(gpu_ids, logger, num_heavy_atom, num_sample,
-                       backend, report_hbahbd, timeout)
+                       backend, report_hbahbd, timeout, smiles_log_dir)
+    if smiles_log_dir:
+        logger.info(f"  [pool] 相異 SMILES 記錄已開啟 → {smiles_log_dir}")
     n = len(gpu_ids)
     tmpdir = tempfile.gettempdir()
 

@@ -54,6 +54,12 @@ def main() -> None:
     p.add_argument("--num_sample",     type=int, default=5000)
     p.add_argument("--backend",        type=str, default="cudaq_nvidia")
     p.add_argument("--report_hbahbd",  action="store_true", default=False)
+    # ★ 多樣性研究（預登記 6b51747）：把每次評估產生的相異 SMILES 附加到檔案，
+    #   供事後計算整個 run 的分子聯集。預設關閉，不影響任何既有實驗。
+    #   刻意用 append-only 純文字而非在記憶體累積：長跑中途死掉也不會失去資料，
+    #   且聯集在分析時才計算，worker 不需維護狀態。
+    p.add_argument("--smiles_log", type=str, default=None,
+                   help="相異 SMILES 的輸出路徑（每次評估一行，tab 分隔）")
     args = p.parse_args()
 
     try:
@@ -118,6 +124,19 @@ def main() -> None:
 
             np.save(rpath, np.array([validity, uniqueness, hba, hbd],
                                     dtype=np.float64))
+
+            # ★ 相異 SMILES 記錄（多樣性研究）。失敗不得影響評估結果——
+            #   這是觀測用的附加輸出，不是目標函數的一部分。
+            if args.smiles_log:
+                try:
+                    smis = sorted(k for k in smiles_dict
+                                  if k and k != "None")
+                    with open(args.smiles_log, "a", encoding="utf-8") as fh:
+                        fh.write("\t".join(smis) + "\n")
+                except Exception as e:                       # noqa: BLE001
+                    print(json.dumps({"warn": f"smiles_log 失敗: {str(e)[:80]}"}),
+                          flush=True)
+
             print(json.dumps({"ok": True, "r": rpath}), flush=True)
 
         except Exception as e:                            # noqa: BLE001

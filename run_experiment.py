@@ -149,6 +149,11 @@ def parse_args():
                         "設為 >= max_evals 等於不設限）")
     p.add_argument("--tune_every", type=int, default=None,
                    help="BO 超參數重調頻率（預設每 25 次迭代）")
+    # ── 多樣性研究（預登記 6b51747）────────────────────────────────────
+    #   記錄每次評估產生的相異 SMILES，供事後計算整個 run 的分子聯集。
+    #   預設關閉：既有實驗的行為完全不變。
+    p.add_argument("--smiles_log", action="store_true", default=False,
+                   help="記錄相異 SMILES 到 <data_dir>/<task>_smiles/（多樣性研究用）")
     p.add_argument("--ablate", type=str, default=None,
                    choices=["none", "sobol", "obl", "ae", "vu", "mc"],
                    help="RR-QPSO 組件消融：關閉指定的單一組件。"
@@ -225,11 +230,14 @@ def main() -> None:
         if args.pool:
             from evaluator import make_pooled_evaluator
             logger.info(f"  派工          : local pool（常駐 worker）GPU={gpu_ids}")
+            smi_dir = (os.path.join(args.data_dir, f"{task}_smiles")
+                       if args.smiles_log else None)
             batch_fn = make_pooled_evaluator(
                 cwg=cwg, logger=logger, gpu_ids=gpu_ids,
                 num_heavy_atom=args.num_heavy_atom, num_sample=args.num_sample,
                 backend=args.backend, timeout=args.subprocess_timeout,
-                report_hbahbd=report_hbahbd, shot_seed=args.shot_seed)
+                report_hbahbd=report_hbahbd, shot_seed=args.shot_seed,
+                smiles_log_dir=smi_dir)
         else:
             from evaluator import make_local_evaluator
             logger.info(f"  派工          : local（每次評估開新行程）GPU={gpu_ids}")
