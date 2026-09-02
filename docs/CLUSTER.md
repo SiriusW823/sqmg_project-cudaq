@@ -162,6 +162,14 @@ A hand-maintained list of "files to sync" will eventually omit one. It did:
 absent on the cluster, and an experiment ran against the old code. `git pull`
 does not have that failure mode.
 
+Copying files over also fights git directly. Anything pushed by SFTP shows up on
+the cluster as a *modified tracked file*, which blocks the next `git pull` and has
+to be resolved by hand each time. The SFTP tool has therefore been retired — it
+now prints this guidance and exits non-zero rather than copying anything. If a
+pull is blocked by modified tracked files, `SQMG/scripts/dgx_resolve_and_pull.sh`
+hashes each against `origin/main`, restores the identical ones, backs up any that
+differ, and then pulls.
+
 Two things make this safe while jobs are running:
 
 - Every `results*/` directory is git-ignored, so `git pull` and even
