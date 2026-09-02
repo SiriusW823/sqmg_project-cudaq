@@ -380,7 +380,7 @@ documents are cross-checked against that JSON by
 | 6 | BO comparison | 4 × 10 + 20 seeds | 60 | Population methods win 10/10, δ = +1.000 |
 | 7 | CMA-ES confirmatory | 3 × 10 held-out seeds | 30 | Inconclusive; Friedman p = 0.0247 ranks RR-QPSO last |
 | 8 | Constrained objective | 3 × 10 seeds | 30 | H1 null (p = 0.080); **H2 supported**: RR-QPSO > CMA-ES, δ = +0.940 |
-| 9 | H1 replication at adequate power | 2 × 45 held-out seeds | 90 | **running** — pre-registered |
+| 9 | H1 replication at adequate power | 2 × 45 held-out seeds | 90 | Effect **reversed**: d_z +0.427 → −0.312; line of inquiry closed |
 
 Pre-registrations for experiments 4 and 7 were committed to git before their data
 existed; the commit timestamps are the record.
@@ -421,18 +421,28 @@ CMA-ES loses 0.22 when the property constraint is added; RR-QPSO loses 0.09.
 A single Gaussian model is drawn into the void between modes on a multimodal
 landscape, where a particle swarm can occupy several at once.
 
-RR-QPSO versus plain QPSO on this objective is **not** established: Δ = +0.0186,
-8/10 wins, p = 0.0801 against a pre-registered α of 0.05, reported as null. The
-interaction test that would show the difference to be objective-specific is also
-not significant (p = 0.4922). Reaching 80% power at the observed d_z = 0.427
-requires n ≈ 43; that is a separate pre-registered study, not an extension of
-this one, and it is currently running.
+RR-QPSO versus plain QPSO on this objective is **refuted, not merely unproven**.
+An n = 10 discovery sample suggested an advantage (Δ = +0.0186, 8/10 wins,
+p = 0.0801, d_z = +0.427). A pre-registered replication on 45 held-out seeds
+reversed it:
+
+| Sample | n | Δ median | Wins | d_z | p |
+|---|---|---|---|---|---|
+| Discovery | 10 | **+0.0186** | 8/10 | **+0.427** | 0.0801 |
+| Replication | 45 | **−0.0267** | 15/45 | **−0.312** | 0.9940 |
+
+The effect did not shrink — it changed sign. The replication's 95% CI
+[−0.0374, −0.0095] excludes zero on the negative side. The interaction test that
+would have made any difference objective-specific was also null (p = 0.4922).
+Per the pre-registered stopping rule this line of inquiry is closed: no added
+seeds, no substituted endpoint, no third objective.
 
 **The defensible claim, stated with its scope:** *on constrained multi-objective
 molecular generation, the QPSO family outperforms CMA-ES; on the unconstrained
-objective the three are equivalent or favour plain QPSO.* This is narrower than
-"RR-QPSO is better", and unlike that claim it is supported by a pre-registered
-test.
+objective the three are equivalent or favour plain QPSO; and RR-QPSO's
+quantum-inspired refinements do not improve on plain QPSO under either
+objective.* This is narrower than "RR-QPSO is better", and unlike that claim
+every part of it rests on a pre-registered test.
 
 These are separate claims about different comparisons and must be reported
 separately.
