@@ -263,10 +263,34 @@ of the same trade, and the reason the mode-collapse guard exists.
 
 So the mechanisms are not inert; they change search behaviour in exactly the
 direction their design implies. On `max V×U` at a fixed evaluation budget that
-trade is a consistent net loss. Whether the extra breadth buys anything on a
-**set-level** endpoint — the number of distinct molecules a run produces, which
-is what a generator actually delivers — is the subject of the study now running
-(pre-registered, seeds 100–129).
+trade is a consistent net loss.
+
+**Does the extra breadth buy anything at the set level?** A pre-registered study
+(n = 30 held-out seeds) measured `D`, the count of distinct valid SMILES a run
+produces — what a generator actually delivers, and the endpoint the diversity
+mechanisms are aimed at.
+
+| | Distinct molecules D | Coverage C | max V×U |
+|---|---|---|---|
+| RR-QPSO | **308,068** | 271.5 | 0.8600 |
+| QPSO | 269,920 | 243.5 | 0.8490 |
+| Δ (median) | +23,522 | +23.5 | −0.0145 |
+
+RR-QPSO does produce more molecules (19/30 wins), but not significantly after
+correction (p_holm = 0.0667) — and the second, more informative hypothesis fails
+decisively. Regressing `D` on coverage across all 60 runs gives
+`D = 2,148·C − 280,926` (R² = 0.386): each additional grid cell is worth ~2,148
+molecules, so RR-QPSO's +23.5 cells predict **+50,500** molecules. It delivered
++23,522. After controlling for how much it explored, RR-QPSO produces **fewer**
+molecules than expected (Δ = −27,990, 7/30 wins).
+
+Its exploration is not better directed. It is less productive per unit of
+breadth.
+
+One observation is worth keeping: the two methods explore genuinely different
+regions. Across all seeds their molecule sets overlap on only ~1.5 M of ~3.1–3.4 M
+each, so their union (≈5.0 M) far exceeds either alone. That is an argument for
+ensembling, not for RR-QPSO.
 
 ### Measurement noise and the reliability of single-run comparisons
 
@@ -410,7 +434,7 @@ documents are cross-checked against that JSON by
 | 7 | CMA-ES confirmatory | 3 × 10 held-out seeds | 30 | Inconclusive; Friedman p = 0.0247 ranks RR-QPSO last |
 | 8 | Constrained objective | 3 × 10 seeds | 30 | H1 null (p = 0.080); **H2 supported**: RR-QPSO > CMA-ES, δ = +0.940 |
 | 9 | H1 replication at adequate power | 2 × 45 held-out seeds | 90 | Effect **reversed**: d_z +0.427 → −0.312; line of inquiry closed |
-| 10 | Set-level diversity endpoint | 2 × 30 held-out seeds | 60 | **running** — pre-registered, and the last such attempt |
+| 10 | Set-level diversity endpoint | 2 × 30 held-out seeds | 60 | H1 p_holm = 0.067; **H2 fails decisively** — exploration is less productive per unit of breadth |
 
 Pre-registrations for experiments 4, 7, 8, 9 and 10 were committed to git before
 their data existed; the commit timestamps are the record. Each states its
@@ -472,12 +496,24 @@ would have made any difference objective-specific was also null (p = 0.4922).
 Per the pre-registered stopping rule this line of inquiry is closed: no added
 seeds, no substituted endpoint, no third objective.
 
+**Layer 4 — the refinements do not help on a set-level endpoint either.**
+Ten experiments, ~620 runs, five pre-registered confirmatory studies, two
+objectives and two classes of endpoint (single-point optimization quality and
+set-level generation diversity) find no advantage for the quantum-inspired
+mechanisms over plain QPSO. They measurably change search behaviour — ~10%
+broader coverage — but that breadth is less productive per unit than plain
+QPSO's, and buys nothing on either endpoint.
+
 **The defensible claim, stated with its scope:** *on constrained multi-objective
 molecular generation, the QPSO family outperforms CMA-ES; on the unconstrained
 objective the three are equivalent or favour plain QPSO; and RR-QPSO's
 quantum-inspired refinements do not improve on plain QPSO under either
-objective.* This is narrower than "RR-QPSO is better", and unlike that claim
-every part of it rests on a pre-registered test.
+objective or either class of endpoint.* This is narrower than "RR-QPSO is
+better", and unlike that claim every part of it rests on a pre-registered test.
+
+The search for an advantage is closed by the stopping rule set out in advance in
+the last pre-registration. Four attempts, each planned before its data existed,
+is the limit that was declared and honoured.
 
 These are separate claims about different comparisons and must be reported
 separately.
