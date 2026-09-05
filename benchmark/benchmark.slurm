@@ -48,6 +48,24 @@ EXTRA=""
 [ -n "${TUNE_EVERY:-}" ]    && EXTRA="$EXTRA --tune_every $TUNE_EVERY"
 [ "${SMILES_LOG:-0}" = "1" ] && EXTRA="$EXTRA --smiles_log"
 
+# ── ax_bo 專用：跨環境執行 ──────────────────────────────────────────────
+# ax-platform 0.4.3 會拉 CUDA 13 的 torch，與 cuda-quantum 0.7.1 的 CUDA 12
+# 衝突，兩者無法共存於同一個 conda 環境。因此：
+#   父行程（Ax 的 GP 配適與選點）跑在 ax-bo，
+#   子行程（分子模擬）由 QMG_WORKER_PYTHON 指向 cudaq-v071。
+# 這是唯一會用到跨環境的演算法；其餘一律留在 cudaq-v071。
+PYBIN=python
+if [ "$ALGO" = "ax_bo" ]; then
+  AXPY=/beegfs/home/sirius/.conda/envs/ax-bo/bin/python
+  CQPY=$(command -v python)                 # 此刻已 activate cudaq-v071
+  if [ ! -x "$AXPY" ]; then
+    echo "[FATAL] 找不到 ax-bo 直譯器：$AXPY"; exit 3
+  fi
+  export QMG_WORKER_PYTHON="$CQPY"
+  PYBIN="$AXPY"
+  echo "  跨環境：父=$AXPY  worker=$QMG_WORKER_PYTHON"
+fi
+
 echo "=== benchmark start $(date) ==="
 echo "  job=$SLURM_JOB_ID nodes=$SLURM_NNODES nodelist=$SLURM_NODELIST"
 echo "  algo=$ALGO seed=$SEED M=$M T=$T shots=$SHOTS dispatch=$DISPATCH"
@@ -55,14 +73,14 @@ echo "  algo=$ALGO seed=$SEED M=$M T=$T shots=$SHOTS dispatch=$DISPATCH"
 mkdir -p "$DATA_DIR"
 
 if [ "$DISPATCH" = "local" ]; then
-  python run_experiment.py \
+  "$PYBIN" run_experiment.py \
       --optimizer "$ALGO" --objective "$OBJECTIVE" \
       --M "$M" --T "$T" --seed "$SEED" \
       --num_sample "$SHOTS" \
       --dispatch local --n_gpus "${NGPUS:-8}" \
       --data_dir "$DATA_DIR" --task_name "$TASK" $RESUME_FLAG $EXTRA
 else
-  python run_experiment.py \
+  "$PYBIN" run_experiment.py \
       --optimizer "$ALGO" --objective "$OBJECTIVE" \
       --M "$M" --T "$T" --seed "$SEED" \
       --num_sample "$SHOTS" \
