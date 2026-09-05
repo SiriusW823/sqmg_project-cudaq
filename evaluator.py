@@ -79,7 +79,12 @@ class _WorkerPool:
         env["PYTHONPATH"] = REPO_DIR + os.pathsep + env.get("PYTHONPATH", "")
         env["PYTHONUNBUFFERED"] = "1"
 
-        cmd = [sys.executable, os.path.join(REPO_DIR, "persistent_worker.py"),
+        # ★ worker 必須用「有 cuda-quantum 的直譯器」啟動，而它未必等於目前這個。
+        #   Ax/BoTorch 需要 torch + CUDA 13，與 cudaq 0.7.1 的 CUDA 12 衝突，
+        #   因此 Ax 跑在獨立的 ax-bo 環境；此時 sys.executable 是 ax-bo 的 python，
+        #   而它沒有 cudaq。用 QMG_WORKER_PYTHON 指定實際要用的直譯器。
+        worker_py = os.environ.get("QMG_WORKER_PYTHON") or sys.executable
+        cmd = [worker_py, os.path.join(REPO_DIR, "persistent_worker.py"),
                "--num_heavy_atom", str(self.nha),
                "--num_sample", str(self.ns),
                "--backend", self.backend]
@@ -284,7 +289,7 @@ def make_local_evaluator(
                 env["PYTHONPATH"] = REPO_DIR + os.pathsep + env.get("PYTHONPATH", "")
 
                 procs.append((subprocess.Popen(
-                    [sys.executable, worker,
+                    [os.environ.get("QMG_WORKER_PYTHON") or sys.executable, worker,
                      "--weight_path", wpath, "--result_path", rpath,
                      "--num_heavy_atom", str(num_heavy_atom),
                      "--num_sample", str(num_sample),

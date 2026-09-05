@@ -42,6 +42,22 @@ REGISTRY = {
     "rr_qpso":  RRQPSO,
 }
 
+# ★ Ax/BoTorch GPEI（論文原始 BO baseline 的忠實移植）。
+#   延遲註冊：它需要 ax-platform 與 torch，而那些只裝在獨立的 ax-bo 環境裡
+#   （ax 會拉 CUDA 13，與 cudaq-v071 的 CUDA 12 衝突）。在 cudaq-v071 底下
+#   import 失敗是預期行為，不應讓整個 REGISTRY 無法載入。
+#   註：axbo.py 把 ax/torch 的 import 放在 _optimize() 內（避免載入 REGISTRY
+#   就付出 torch 的啟動成本），因此模組層級的 import 一定會成功。要讓 REGISTRY
+#   如實反映可用性，必須主動探測 ax 本身是否存在。
+try:
+    import importlib.util as _ilu
+    if _ilu.find_spec("ax") is None or _ilu.find_spec("torch") is None:
+        raise ImportError("ax / torch 不在此環境（需 ax-bo 環境）")
+    from .axbo import AxBO
+    REGISTRY["ax_bo"] = AxBO
+except Exception:      # noqa: BLE001
+    AxBO = None
+
 # 圖表與表格的顯示名稱（順序即為預設的呈現順序：由弱到強、本方法殿後）
 DISPLAY_NAMES = {
     "sobol":    "Sobol random search",
@@ -50,6 +66,7 @@ DISPLAY_NAMES = {
     "cmaes":    "CMA-ES",
     "bo":       "Bayesian Opt. (sequential)",
     "batch_bo": "Batch BO (q-EI)",
+    "ax_bo":    "Bayesian Opt. (Ax/BoTorch GPEI)",
     "qpso":     "QPSO",
     "rr_qpso":  "RR-QPSO (ours)",
 }
@@ -57,7 +74,7 @@ DISPLAY_NAMES = {
 PLOT_ORDER = ["sobol", "spsa", "de", "cmaes", "bo", "batch_bo", "qpso", "rr_qpso"]
 
 # 每次評估只用 1 顆 GPU、無法填滿批次的演算法（排程時要特別處理）
-SEQUENTIAL = {"bo"}
+SEQUENTIAL = {"bo", "ax_bo"}
 
 
 def get_optimizer(name: str):
