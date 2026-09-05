@@ -112,3 +112,56 @@ and the paper's principal positive claim changes accordingly.
 
 Infrastructure and the §4.3 configuration check only. No hypothesis test on
 partial data.
+
+---
+
+## 7. Amendment — 2026-09-05, before any confirmatory data
+
+Recorded after the smoke test (`results_axsmoke`, seed 999, 12 evaluations) and
+before the confirmatory batch was submitted. Two corrections.
+
+### 7.1 The reference kernel is ARD RBF, not ARD Matérn 5/2
+
+§1's table describes the reference kernel as "ARD Matérn 5/2". The smoke test
+log reports what Ax actually built:
+
+```
+[ax_bo][組態稽核] kernel=RBFKernel/RBFKernel  lengthscale 維度=134  D=134  ARD=是
+[ax_bo][組態稽核] GP 訓練點數=5  已完成評估=6  訓練上限=無
+[ax_bo][組態稽核] 第 0 次評估起改用 generation step：Sobol
+[ax_bo][組態稽核] 第 5 次評估起改用 generation step：GPEI（先前 Sobol 共提出 5 個 trial）
+```
+
+Matérn 5/2 was BoTorch's `SingleTaskGP` default for years; BoTorch 0.12 — the
+version `ax-platform` 0.4.3 pins — replaced it with a dimension-scaled ARD RBF.
+So "Matérn 5/2" was my description of an older default, not of the code the
+comparison actually runs.
+
+This does not change the study. What §1 identifies as the suspected mechanism is
+**isotropic versus per-dimension length scales**, and that contrast is intact:
+134 length scales here against one in `optimizers/bayesopt.py`. §4.3's operative
+criterion was always "an ARD kernel", and the log satisfies it. The correction is
+recorded because the background section stated a fact that turned out to be
+wrong, and it should not be quietly repaired later.
+
+The other two §4.3 conditions are met and now logged rather than inferred:
+exactly 5 Sobol trials precede the first GP step, and no training cap is applied.
+
+One reading note for the exit line, which in the smoke test was
+`{'Sobol': 5, 'GPEI': 8}` for a 12-evaluation budget: it counts trials
+*proposed*, and the last proposal is discarded when the budget runs out mid-step.
+Proposals therefore exceed completed evaluations by exactly one. The evaluation
+count of record is the CSV row count, not this line.
+
+### 7.2 `ax_bo` runs may not be resumed
+
+`BaseOptimizer`'s resume restores the CSV and the evaluation counter, but not
+Ax's internal state — completed trials, GP training data, and the position in
+the generation strategy all live inside `AxClient`. A resumed run would restart
+from 5 Sobol trials with part of the budget already spent, producing neither a
+2,000-evaluation GPEI run nor any describable algorithm.
+
+`optimizers/axbo.py` therefore raises rather than resuming, and the `ax_bo` arm
+is submitted without `RESUME=1`. A run cut short by the wall clock is excluded
+pairwise under §4.4 and counted, exactly as that section already specifies. The
+population and `bo` arms keep resume, which is correct for them.

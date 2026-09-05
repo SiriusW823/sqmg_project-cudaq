@@ -142,6 +142,21 @@ class AxBO(BaseOptimizer):
             self._audited = True
 
     def _optimize(self) -> None:
+        # ★ ax_bo 不能續跑 ─────────────────────────────────────────────────
+        # BaseOptimizer 的續跑機制只還原 CSV 與 n_evals；Ax 的內部狀態
+        # （已完成的 trial、GP 的訓練資料、generation step 的位置）不在其中。
+        # 若讓它續跑，Ax 會重新從 5 個 Sobol 開始，但預算已被扣掉一部分——
+        # 得到的既不是 2,000 次的 GPEI，也不是任何可描述的演算法。
+        # 這種「看起來有結果、其實不是預登記那個東西」正是作廢 HBA/HBD 批次的
+        # 同一類錯誤，所以這裡選擇大聲失敗，讓該次 run 依 §4.4 被排除。
+        if self.n_evals > 0:
+            raise RuntimeError(
+                f"ax_bo 偵測到既有進度（n_evals={self.n_evals}），但 Ax 的內部"
+                "狀態無法還原，續跑會產生與預登記不同的演算法。\n"
+                "  → 請刪除該 task 的 CSV 後從頭重跑，或依預登記 §4.4 將此 seed "
+                "配對排除。切勿使用 --resume 跑 ax_bo。"
+            )
+
         import torch
         from ax.service.ax_client import AxClient
         from ax.service.utils.instantiation import ObjectiveProperties
