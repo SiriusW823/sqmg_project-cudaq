@@ -63,7 +63,17 @@ if [ "$ALGO" = "ax_bo" ]; then
   fi
   export QMG_WORKER_PYTHON="$CQPY"
   PYBIN="$AXPY"
+  # Ax 的 GP 放最後一張卡，模擬 worker 從 0 號開始用，兩者不搶同一張。
+  # CPU 上 GP 開銷是 2.41·n^0.79 秒，2,000 次要 308h/seed——必須用 GPU。
+  export QMG_AX_TORCH_DEVICE="${AX_TORCH_DEVICE:-cuda:3}"
   echo "  跨環境：父=$AXPY  worker=$QMG_WORKER_PYTHON"
+  echo "  Ax GP 裝置：$QMG_AX_TORCH_DEVICE"
+  "$AXPY" -c "
+import torch,sys
+if not torch.cuda.is_available():
+    sys.exit('[FATAL] ax-bo 的 torch (%s) 看不到 GPU，CPU 上跑不完預算' % torch.__version__)
+print('  torch %s  可見 GPU %d 張' % (torch.__version__, torch.cuda.device_count()))
+" || exit 4
 fi
 
 echo "=== benchmark start $(date) ==="

@@ -49,6 +49,8 @@ optimizers/axbo.py — Ax / BoTorch GPEI（論文原始 BO baseline 的忠實移
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from .base import BaseOptimizer
@@ -165,7 +167,28 @@ class AxBO(BaseOptimizer):
         from ax.modelbridge.registry import Models
 
         torch.set_default_dtype(torch.float64)
-        dev = torch.device("cpu")   # 見檔頭「刻意偏離」第 1 點
+
+        # ── torch 裝置：與 upstream 一致，有 GPU 就用 GPU ──────────────────
+        # 原本寫死 CPU（見檔頭「刻意偏離」第 1 點），但那是「放任 pip 自己挑
+        # torch」的後果，不是必然。明確指定 torch 2.5.1+cu121 就能對上叢集的
+        # CUDA 12.2 驅動；ax-bo 與 cudaq-v071 是兩個獨立環境、兩個獨立行程，
+        # 本來就不會互相污染。
+        #
+        # 這件事不只是「比較快」——CPU 上實測 GP 開銷是 2.41·n^0.79 秒，
+        # 外插到 2,000 次評估要 308 小時/seed，預登記的預算根本跑不完。
+        #
+        # QMG_AX_TORCH_DEVICE 讓排程腳本把 GP 放到與模擬 worker 不同的 GPU，
+        # 避免兩者搶同一張卡。
+        dev_str = os.environ.get("QMG_AX_TORCH_DEVICE")
+        if dev_str:
+            dev = torch.device(dev_str)
+        else:
+            dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if dev.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                f"QMG_AX_TORCH_DEVICE={dev_str} 指定了 CUDA，但這個 torch "
+                f"（{torch.__version__}）看不到 GPU。ax-bo 環境需要 +cu121 版的 "
+                "torch；裝成 +cpu 會靜靜地退回 CPU，而 CPU 上跑不完預算。")
 
         gs = GenerationStrategy(steps=[
             GenerationStep(
@@ -197,8 +220,8 @@ class AxBO(BaseOptimizer):
 
         self.logger.info(
             f"  [ax_bo] Ax {getattr(__import__('ax'), '__version__', '?')}  "
-            f"GPEI on {dev}  Sobol trials={self.n_sobol}  D={self.D}  "
-            f"預算={self.max_evals}")
+            f"torch {torch.__version__}  GPEI on {dev}  "
+            f"Sobol trials={self.n_sobol}  D={self.D}  預算={self.max_evals}")
 
         # ── 主迴圈：BaseOptimizer 的預算控制會在上限時拋 BudgetExhausted ──
         prev_step = None
