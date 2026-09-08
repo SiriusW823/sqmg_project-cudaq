@@ -165,3 +165,93 @@ from 5 Sobol trials with part of the budget already spent, producing neither a
 is submitted without `RESUME=1`. A run cut short by the wall clock is excluded
 pairwise under §4.4 and counted, exactly as that section already specifies. The
 population and `bo` arms keep resume, which is correct for them.
+
+---
+
+## 8. Amendment — 2026-09-05, budget reduced from 2,000 to 1,000
+
+The first batch (jobs 87535–87574) was cancelled and is void. This section
+records why the budget changed, and what had been seen at the time, because the
+change was made after partial data existed.
+
+### 8.1 The 2,000-evaluation budget was not computable
+
+Measured on the running jobs, `ax_bo`'s cost per evaluation on CPU grows as
+**2.41·n^0.79 seconds**, where n is the number of points the GP is conditioned on:
+
+| n | 1–50 | 50–100 | 100–150 | 150–200 | 200–300 |
+|---|---|---|---|---|---|
+| s/eval (CPU) | 41 | 77 | 111 | 162 | 192 |
+
+Only 8.6 s of that is the molecule simulation. Extrapolated to 2,000 evaluations
+this is **≈308 hours per seed**; the 48-hour wall clock reaches roughly 700. Ten
+seeds were never going to finish.
+
+§3 justified the 2,000 budget as affordable. That judgement was wrong, and the
+smoke test did not catch it: 12 evaluations sit in the flat part of the curve
+where the GP overhead is 37 s and reads as a constant. The cost curve should have
+been measured before 40 jobs were submitted.
+
+### 8.2 The CPU restriction was removed first
+
+§3's deviation 1 (CPU torch) was not necessary — it described what pip installs
+when left alone, not a constraint. Pinning `torch==2.5.1+cu121` matches the
+cluster's CUDA 12.2 driver, and `ax-bo` and `cudaq-v071` are separate
+environments in separate processes. Upstream runs on GPU, so this **removes**
+a deviation from the reference rather than adding one. §3 deviation 1 no longer
+applies; only deviation 2 (per-seed `random_seed`) stands.
+
+A pilot run of the real pipeline on a V100 (`results_axpilot`, seed 900) gives
+**1.85·n^0.60 s**:
+
+| n | 1–50 | 50–100 | 100–150 | 150–200 | 200–300 |
+|---|---|---|---|---|---|
+| s/eval (CPU) | 41 | 77 | 111 | 162 | 192 |
+| s/eval (GPU) | 22 | 34 | 39 | 47 | 63 |
+
+That is ≈66 h per seed at 2,000 — better, still over the wall clock.
+
+### 8.3 The reference itself uses 205 evaluations
+
+`constrained_bo.py` takes `--num_iterations` and loops
+`range(args.num_iterations + 5)`; upstream's own analysis notebook
+(`analysis_figures/01_bo_analysis.ipynb`) sets `num_iterations = 200` and slices
+`iloc[5:num_iterations+5]`. **The published BO comparison ran 205 evaluations.**
+
+Our pre-registered 2,000 was already 10× the reference's own budget. This makes
+the reduction principled rather than a concession to the wall clock.
+
+### 8.4 Amended design
+
+| Item | Was | Now |
+|---|---|---|
+| Budget (all four arms) | 2,000 | **1,000** |
+| Seeds | 200–209 | **210–219** |
+| Data directory | `results_axbo/` | `results_axbo1k/` |
+| Ax torch device | CPU | **GPU (`cuda:3`)** |
+
+Everything else — arms, objective, M, shots, α schedule, pairing, and the whole
+of §2 and §4 — is unchanged. The budget applies identically to all four arms, so
+it cannot favour any of them.
+
+**Primary endpoint:** best-so-far V×U at exactly 1,000 evaluations.
+**Secondary endpoint:** best-so-far V×U at exactly 205 evaluations, matching the
+published setting. This costs nothing extra — every run logs best-so-far per
+evaluation, so the 205 prefix is read from the same CSVs — and it is reported
+whether or not it agrees with the primary.
+
+Projected cost at 1,000: ≈23 h per `ax_bo` seed, roughly 2× headroom against the
+48-hour limit. The other three arms run 1,000 evaluations in well under an hour.
+
+### 8.5 What had been seen when this was decided
+
+Full disclosure, since the budget was changed with partial data in hand. From
+the cancelled batch: `ax_bo` best-so-far 0.8530 at n≈225; `qpso` 0.8780,
+`rr_qpso` 0.9100, `bo` 0.6760, each at whatever evaluation count that run had
+reached (1,030–2,000, not matched across arms). No hypothesis-relevant paired
+comparison was computed, and no test was run.
+
+Seeds 210–219 are disjoint from those runs, so the confirmatory data is drawn
+from a search this decision never touched. The cancelled runs are retained in
+`results_axbo_void/` and `results_axbo_2k_superseded/` for the cost analysis
+above, and are **not** eligible as confirmatory data under any endpoint.
