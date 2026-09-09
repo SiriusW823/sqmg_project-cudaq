@@ -234,7 +234,7 @@ Everything else — arms, objective, M, shots, α schedule, pairing, and the who
 of §2 and §4 — is unchanged. The budget applies identically to all four arms, so
 it cannot favour any of them.
 
-**Primary endpoint:** best-so-far V×U at exactly 1,000 evaluations.
+**Primary endpoint:** best-so-far V×U at exactly **960** evaluations — see §8.6.
 **Secondary endpoint:** best-so-far V×U at exactly 205 evaluations, matching the
 published setting. This costs nothing extra — every run logs best-so-far per
 evaluation, so the 205 prefix is read from the same CSVs — and it is reported
@@ -255,3 +255,33 @@ Seeds 210–219 are disjoint from those runs, so the confirmatory data is drawn
 from a search this decision never touched. The cancelled runs are retained in
 `results_axbo_void/` and `results_axbo_2k_superseded/` for the cost analysis
 above, and are **not** eligible as confirmatory data under any endpoint.
+
+### 8.6 Correction: the primary endpoint is 960, not 1,000
+
+§8.4 first said 1,000. That number is not reachable by every arm, and the error
+was mine in writing the amendment.
+
+`RRQPSO` delegates to `AESOQPSOOptimizer` with
+`T = max_evals // M - 2`, so it always spends `(T + 2)·M` — the largest multiple
+of the population size that does not exceed the budget. With M = 64 that is:
+
+| Budget | RR-QPSO actually uses | Unused |
+|---|---|---|
+| 9,664 | 9,664 | 0 |
+| 2,000 | 1,984 | 16 |
+| 1,000 | **960** | 40 |
+
+Plain `QPSO` instead loops until `BudgetExhausted` and lands on the budget
+exactly, as do `bo` and `ax_bo`. So at a 1,000 budget RR-QPSO gets 960
+evaluations and the other three get 1,000 — a 4% asymmetry, against our own
+method.
+
+Reading every arm at **960** removes it: QPSO's, BO's and Ax's extra 40
+evaluations are discarded, and all four arms are compared on exactly the same
+number. This is the convention §2 already used, where the 2,000-evaluation
+budget was read at 1,984 for the same reason.
+
+The correction is structural — 960 follows from M and the budget alone, is fixed
+before any arm's outcome at that endpoint was computed, and could not have been
+chosen to favour anything. All nine completed RR-QPSO runs ended cleanly
+(`完成 評估 960/1000`, no errors); the stop is by design, not a failure.
