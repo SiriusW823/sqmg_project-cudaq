@@ -29,7 +29,7 @@ optimizers/ — SQMG 參數搜尋演算法套件（v12.0）
 from .base import BaseOptimizer, BudgetExhausted
 from .baselines import SobolRandomSearch, DifferentialEvolution, CMAES, SPSA
 from .bayesopt import BayesianOptimization, BatchBayesianOptimization
-from .qpso import QPSO, RRQPSO
+from .qpso import QPSO, RRQPSO, RRQPSO2
 
 REGISTRY = {
     "sobol":    SobolRandomSearch,
@@ -40,6 +40,12 @@ REGISTRY = {
     "spsa":     SPSA,
     "qpso":     QPSO,
     "rr_qpso":  RRQPSO,
+    # ★ rr_qpso2：論文 §III 的 RR-QPSO，實作在與 qpso 同一支程式裡。
+    #   `rr_qpso` 走舊 runner，與 qpso 分屬兩套程式碼、兩種 α 排程、
+    #   兩種預算會計，還多帶四個論文未描述的機制，因此無法隔離 RR 機制
+    #   （見 docs/FAIRNESS_AUDIT.md）。舊的保留以重現既有實驗，
+    #   新的比較一律用 rr_qpso2 對 qpso。
+    "rr_qpso2": RRQPSO2,
 }
 
 # ★ Ax/BoTorch GPEI（論文原始 BO baseline 的忠實移植）。
@@ -68,7 +74,8 @@ DISPLAY_NAMES = {
     "batch_bo": "Batch BO (q-EI)",
     "ax_bo":    "Bayesian Opt. (Ax/BoTorch GPEI)",
     "qpso":     "QPSO",
-    "rr_qpso":  "RR-QPSO (ours)",
+    "rr_qpso":  "RR-QPSO (legacy runner)",
+    "rr_qpso2": "RR-QPSO (ours)",
 }
 
 PLOT_ORDER = ["sobol", "spsa", "de", "cmaes", "bo", "batch_bo", "qpso", "rr_qpso"]
@@ -90,6 +97,6 @@ __all__ = [
     "BaseOptimizer", "BudgetExhausted",
     "SobolRandomSearch", "DifferentialEvolution", "CMAES", "SPSA",
     "BayesianOptimization", "BatchBayesianOptimization",
-    "QPSO", "RRQPSO",
+    "QPSO", "RRQPSO", "RRQPSO2",
     "REGISTRY", "DISPLAY_NAMES", "PLOT_ORDER", "SEQUENTIAL", "get_optimizer",
 ]

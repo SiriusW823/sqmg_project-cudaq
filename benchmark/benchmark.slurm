@@ -46,6 +46,11 @@ EXTRA=""
 [ -n "${ABLATE:-}" ]     && EXTRA="$EXTRA --ablate $ABLATE"
 [ -n "${MAX_GP_POINTS:-}" ] && EXTRA="$EXTRA --max_gp_points $MAX_GP_POINTS"
 [ -n "${TUNE_EVERY:-}" ]    && EXTRA="$EXTRA --tune_every $TUNE_EVERY"
+# rr_qpso2 的組件旗標（單一變因消融）
+[ -n "${SOBOL_INIT:-}" ]     && EXTRA="$EXTRA --sobol_init $SOBOL_INIT"
+[ -n "${RANK_REFINED:-}" ]   && EXTRA="$EXTRA --rank_refined $RANK_REFINED"
+[ -n "${FITNESS_GUIDED:-}" ] && EXTRA="$EXTRA --fitness_guided $FITNESS_GUIDED"
+[ -n "${RHO:-}" ]            && EXTRA="$EXTRA --rho $RHO"
 [ "${SMILES_LOG:-0}" = "1" ] && EXTRA="$EXTRA --smiles_log"
 
 # ── ax_bo 專用：跨環境執行 ──────────────────────────────────────────────

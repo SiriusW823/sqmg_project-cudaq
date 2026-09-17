@@ -154,6 +154,20 @@ def parse_args():
     #   預設關閉：既有實驗的行為完全不變。
     p.add_argument("--smiles_log", action="store_true", default=False,
                    help="記錄相異 SMILES 到 <data_dir>/<task>_smiles/（多樣性研究用）")
+    # ── rr_qpso2 的組件旗標（論文 §III 的三個組件，單一變因消融用）──────
+    #   不指定 = 沿用類別預設（qpso 全關、rr_qpso2 全開）。
+    #   指定 = 覆寫，例如 --rank_refined 0 就是「RR-QPSO 但拿掉 rank-refined」。
+    def _bool(s):
+        return str(s).strip().lower() in ("1", "true", "yes", "on")
+    p.add_argument("--sobol_init", type=_bool, default=None,
+                   help="Sobol 初始化（論文 §III-B）")
+    p.add_argument("--rank_refined", type=_bool, default=None,
+                   help="rank-refined mbest（論文 §III-C, Eq.9）")
+    p.add_argument("--fitness_guided", type=_bool, default=None,
+                   help="fitness-guided 吸引子（論文 §III-D, Eq.10/11）")
+    p.add_argument("--rho", type=float, default=None,
+                   help="Eq.9 的修正強度（論文用 0.015）")
+
     p.add_argument("--ablate", type=str, default=None,
                    choices=["none", "sobol", "obl", "ae", "vu", "mc"],
                    help="RR-QPSO 組件消融：關閉指定的單一組件。"
@@ -259,7 +273,12 @@ def main() -> None:
     for k, v in (("alpha_max", args.alpha_max), ("alpha_min", args.alpha_min),
                  ("ablate", args.ablate),
                  ("max_gp_points", args.max_gp_points),
-                 ("tune_every", args.tune_every)):
+                 ("tune_every", args.tune_every),
+                 # rr_qpso2 的三個組件旗標（消融用；None = 沿用類別預設）
+                 ("sobol_init", args.sobol_init),
+                 ("rank_refined", args.rank_refined),
+                 ("fitness_guided", args.fitness_guided),
+                 ("rho", args.rho)):
         if v is not None and k in accepted:
             extra[k] = v
     if extra:
