@@ -162,6 +162,28 @@ improvement of 0.040, or 4.0 percentage points, over BO"). It also anchors the
 multi-objective comparison in §IV-C (BO at V×U = 43.8%), whose provenance should
 be checked the same way.
 
+### One hypothesis checked, and ruled out
+
+Table I reports RR-QPSO at V×U = 90.2% for **both** M = 16 and M = 32 — the same
+three-significant-figure value as the BO baseline. That raised the possibility
+that the BO bar had been filled from a sweep row by mistake. Checked against the
+CSVs:
+
+| Run | max V×U in CSV | Table I |
+|---|---|---|
+| `results_sweep_M16` | 0.9028 | 90.2 |
+| `results_sweep_M32` | 0.9024 | 90.2 |
+| `results_sweep_M48` | 0.9250 | 92.4 |
+| `results_v8` (M = 64) | 0.9310 | 93.0 |
+| `results_sweep_M96` | 0.9394 | 94.0 |
+| `results_sweep_M128` | 0.9420 | 94.2 |
+
+Two things follow. **Table I's V×U column is fully reproducible** from the sweep
+CSVs — all six rows match. And the 90.2 collision is a genuine coincidence at
+three significant figures: Fig. 2's BO bar reports V = 94.2 / U = 95.7 while
+Table I's M = 32 row reports V = 94.4 / U = 95.6, so the BO bar is not a copy of
+the sweep row. **The provenance of 0.902 remains open.**
+
 ### Action required
 
 Locate the run that produced 0.902, or re-run the BO baseline and report the
