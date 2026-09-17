@@ -96,19 +96,29 @@ RR-QPSO update.
 
 ## Results
 
-> ### ⚠ Status: the optimizer comparison has been superseded
+> ### ⚠ Status: the optimizer comparison has been superseded — twice
 >
-> The original optimizer comparison (§ "Superseded single-run results" below)
-> rested on **single runs, n = 1**. A subsequent methodological study — **360 runs
-> across seven experiments**, paired designs, 5–30 seeds per configuration — does
-> not reproduce its central claim. Two of the three differences it reported are
-> smaller than the measured shot-noise selection bias.
+> **1. The single-run comparison does not replicate.** The original optimizer
+> comparison (§ "Superseded single-run results" below) rested on **single runs,
+> n = 1**. A methodological study — **660 runs across eleven experiments**, paired
+> designs, 5–30 seeds per configuration — does not reproduce its central claim.
+> Two of the three differences it reported are smaller than the measured
+> shot-noise selection bias.
+>
+> **2. The Bayesian-optimization baseline was under-configured.** Every BO figure
+> in this repository came from `optimizers/bayesopt.py`, which is weaker than the
+> reference implementation the original QMG study used, in three ways that all
+> favour the reference. A pre-registered head-to-head found the reference wins
+> **10/10 paired seeds, δ = +1.000, p_holm = 0.0029**. The claim that population
+> methods beat Bayesian optimization is **withdrawn**; at matched budgets the
+> result reverses.
 >
 > The particle-count sweep and the multi-objective results are **not** affected
-> and are retained below.
+> by (1) and are retained below; their BO comparison points are affected by (2).
 >
 > Full study: [`docs/RESULTS.md`](docs/RESULTS.md) ·
-> Data index: [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md)
+> Data index: [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) ·
+> Manuscript errata: [`docs/PAPER_ERRATA.md`](docs/PAPER_ERRATA.md)
 
 All figures below use the 134-parameter, 20-qubit dynamic circuit, CUDA-Q 0.7.1
 (cuStateVec) on NVIDIA V100 GPUs, and report the validity–uniqueness product
@@ -129,9 +139,9 @@ RNG, so comparisons are paired.
 | 3 | RR-QPSO (this work) | 0.9640 | 0.0169 | 2.80 |
 | 4 | Differential Evolution | 0.9160 | 0.0187 | 3.80 |
 | 5 | SPSA | 0.7190 | 0.0143 | 5.00 |
-| 6 | Batch BO | 0.6950 | 0.0168 | 6.00 |
+| 6 | ~~Batch BO~~ ‡ | ~~0.6950~~ | 0.0168 | 6.00 |
 | 7 | Sobol random search | 0.5700 | 0.0318 | 7.00 |
-| — | Bayesian Optimization † | 0.6925 | 0.0139 | — |
+| — | ~~Bayesian Optimization~~ †‡ | ~~0.6925~~ | 0.0139 | — |
 
 Friedman χ² = 28.114, **p = 0.00009** — the algorithms differ.
 
@@ -139,20 +149,76 @@ Friedman χ² = 28.114, **p = 0.00009** — the algorithms differ.
 9,664 within the wall clock); the full-budget figure comes from a separate n = 10
 run. In the same batch at 2,000 evaluations BO reaches 0.6700.
 
-Two results carry the weight here:
+‡ **Both BO rows are an implementation artefact and must not be read as what
+Bayesian optimization achieves on this problem.** `optimizers/bayesopt.py` is a
+hand-written GP-EI that differs from the reference implementation used by the
+original QMG study in three ways, each favouring the reference: an isotropic
+Matérn kernel instead of ARD, a 400-point cap on GP training data, and 128 Sobol
+initial trials instead of 5. At D = 134 an isotropic kernel asserts that all 134
+parameters share one length scale. A pre-registered head-to-head against the
+reference (`docs/PREREGISTRATION_axbo.md`, committed before data) found the
+reference beats our implementation **10/10 paired seeds, Cliff's δ = +1.000,
+median +0.2960, p_holm = 0.0029.** These two rows are retained struck through
+so the record of what was originally reported stays visible.
 
-- **Population-based optimization decisively beats Bayesian optimization.** At a
-  matched budget, QPSO and RR-QPSO each win **10/10** paired seeds against BO
-  (Cliff's δ = **+1.000**, complete separation; p_holm = 0.0039 at full budget,
-  Friedman p = 0.00002 in the dedicated n = 10 batch). The gap widens with budget:
-  BO leads below ~500 evaluations, then plateaus at 0.6925 while the population
-  methods continue to 0.97.
+**The claim that population methods beat Bayesian optimization is withdrawn.**
+It was measured against the comparator above. Re-measured against the reference
+implementation at a matched budget, the result reverses — see the next section.
+
+One result from this batch still stands:
+
 - **CMA-ES matches RR-QPSO** (Δ = −0.0010, RR winning 1/5) at roughly one third
   the spread (SD 0.0055 vs 0.0169). CMA-ES contains no quantum-inspired
-  component. A confirmatory test of this comparison at n = 10 on held-out seeds is
-  currently running.
+  component. This comparison does not involve BO and is unaffected.
 
 Sobol random search finishing last is the intended sanity check on the harness.
+
+### Bayesian optimization, re-measured against the reference implementation
+
+**Pre-registered** (`docs/PREREGISTRATION_axbo.md`, committed before any data).
+Ax/BoTorch `Models.GPEI` ported faithfully from upstream `constrained_bo.py`:
+ARD kernel, no cap on GP training points, 5 Sobol trials, GP on GPU. Four arms,
+**10 paired seeds (210–219)**, identical budget enforced in `optimizers/base.py`,
+1,000 shots. The mandatory §4.3 configuration check passed on 10/10 runs.
+
+| Optimizer | Median V×U @ 960 evals | @ 205 evals |
+|---|---|---|
+| **Ax/BoTorch GPEI — reference BO** | **0.9290** | **0.7990** |
+| RR-QPSO (this work) | 0.7790 | 0.4540 |
+| QPSO | 0.7740 | 0.4705 |
+| Bayesian Optimization (`bayesopt.py`) | 0.6360 | 0.5415 |
+
+Pre-registered hypotheses, one-sided paired Wilcoxon, Holm-corrected:
+
+| Hypothesis | Δ median | 95% CI | Cliff's δ | Wins | p_holm | Result |
+|---|---|---|---|---|---|---|
+| H3: reference BO > our BO | **+0.2960** | [+0.248, +0.308] | **+1.000** | 10/10 | **0.0029** | **supported** |
+| H1: QPSO > reference BO | −0.1450 | [−0.183, −0.092] | −0.840 | 0/10 | 1 | not supported |
+| H2: RR-QPSO > reference BO | −0.1400 | [−0.193, −0.084] | −0.860 | 1/10 | 1 | not supported |
+
+H1 and H2 do not merely fail — the effect is reversed. Reverse-direction
+one-sided p = 0.00098 and 0.00195 respectively (descriptive; not pre-registered).
+
+205 evaluations is the budget the original QMG code actually uses:
+`constrained_bo.py` loops `range(num_iterations + 5)` and the upstream analysis
+notebook sets `num_iterations = 200`. The reference BO wins decisively there too.
+
+**Endpoint is 960, not 1,000.** `RRQPSO` delegates to `AESOQPSOOptimizer` with
+`T = max_evals // M − 2`, so it spends the largest multiple of M within budget —
+960 of 1,000 at M = 64, where the other three arms land on 1,000 exactly. Reading
+every arm at 960 discards the others' extra 40 evaluations and removes a 4%
+asymmetry that ran against RR-QPSO. See `docs/PREREGISTRATION_axbo.md` §8.6.
+
+**Limitation, stated plainly.** The reference BO's lead shrinks with budget:
++0.33 at 205 evaluations, +0.155 at 960. The eight-algorithm table above is at
+9,664, and Ax GPEI cannot be run there — measured GP cost is 1.85·n^0.60 s per
+evaluation on a V100, extrapolating to **roughly 760 hours for a single seed**.
+So the BO cell of the 9,664-budget table cannot be filled with the reference
+implementation, and whether the population methods overtake it at that budget is
+**untested**. What can be said is that the reference BO reaches 0.929 in 960
+evaluations, a level the population methods need roughly ten times more
+evaluations to approach — a cross-experiment observation, not budget-matched and
+not pre-registered, so descriptive only.
 
 **Power limitation.** At n = 5 the smallest attainable paired-Wilcoxon p is
 0.0625, and 0.4375 after Holm correction across seven comparisons — pairwise
@@ -305,30 +371,54 @@ and a single run cannot separate the two.
 
 ![Noise versus claimed differences](figures_method/fig_m4_noise_vs_claims.png)
 
-| Originally claimed difference | Value | Inside the noise band? |
-|---|---|---|
-| RR-QPSO vs QPSO + Sobol | 0.016 | **yes** |
-| QPSO + Sobol vs QPSO | 0.009 | at the lower edge |
-| RR-QPSO vs BO | 0.028 | no — just above |
+| Originally claimed difference | Value | Inside the noise band? | Replicated? |
+|---|---|---|---|
+| RR-QPSO vs QPSO + Sobol | 0.016 | **yes** | no — p = 0.71 at n = 10 |
+| QPSO + Sobol vs QPSO | 0.009 | at the lower edge | no — and the sign was reported backwards, see below |
+| RR-QPSO vs BO | 0.028 | no — just above | **comparator invalid** |
 
 The two differences that fall inside the band did not replicate under paired
-testing. The one that exceeded it did. The noise analysis predicted which claim
-would survive, which is the strongest available evidence that the band is
-calibrated.
+testing. The third exceeded the band and did replicate against the same
+comparator — but that comparator has since been shown to be an under-configured
+BO implementation, so the difference is real with respect to `bayesopt.py` and
+says nothing about Bayesian optimization. The noise band itself remains
+calibrated for the two within-population comparisons.
 
 ### Superseded single-run results
 
 Retained for provenance. **These are n = 1 and should not be cited as evidence
-of an ordering** — see the paired results above.
+of an ordering** — see the paired results above. Two rows carry corrections.
 
-| Optimizer | V (%) | U (%) | V × U (%) |
-|---|---|---|---|
-| BO (re-run baseline) | 94.2 | 95.7 | 90.2 |
-| QPSO (no Sobol init) | — | — | 90.5 |
-| QPSO + Sobol init | — | — | 91.4 |
-| RR-QPSO (this work) | 95.9 | 97.0 | 93.0 |
+| Optimizer | V (%) | U (%) | V × U (%) | As published | Correction |
+|---|---|---|---|---|---|
+| BO (“re-run baseline”) | 94.2 | 95.7 | 90.2 | 90.2 | **provenance unverified** — see below |
+| QPSO, no Sobol init | — | — | **91.4** | 90.5 | **swapped** in Fig. 2 |
+| QPSO + Sobol init | — | — | **90.5** | 91.4 | **swapped** in Fig. 2 |
+| RR-QPSO (this work) | 95.9 | 97.0 | 93.0 | 93.0 | — |
+
+**The two QPSO rows were transposed in Fig. 2.** Read from the log headers
+rather than the directory names, `results_qpso_nosobol/console.log` (random
+init) ends at **V×U = 0.9144** and `results_qpso_pure/console.log`
+(`初始化策略: Sobol scrambled (seed=0)`) ends at **0.9046**. Both are otherwise
+identical: M = 64, T = 150, 9,664 evaluations, 5,000 shots, OBL off. So in this
+single run Sobol initialization **lowered** V×U by 0.0098 — the opposite of what
+the published text concludes. Both differences are within the noise band above,
+so neither direction is established; the point is that the figure and the
+sentence state the reverse of what the run produced.
+
+**The BO baseline of 0.902 could not be traced.** §IV-A of the manuscript states
+it was re-run in-house rather than taken from the literature, but the best BO
+result anywhere in this repository is 0.7150 at the same 9,664-evaluation budget
+(`results_bofull/`, n = 10), and the only 0.90-range figure in the codebase is a
+hard-coded literature constant of 0.8834 attributed to Chen 2025
+(`qpso_optimizer_ae.py:80`), which matches neither 0.902 nor the reported
+V = 94.2 / U = 95.7. This is an absence of evidence, not proof that no such run
+happened. Full write-up: [`docs/PAPER_ERRATA.md`](docs/PAPER_ERRATA.md).
 
 ![Fig. 2 — original optimizer comparison](figures/fig2_VU_bars.png)
+
+> The figure above is reproduced as published, with the transposition described
+> in the table. It should be regenerated before reuse.
 
 ### Effect of particle count — Fig. 3 / Table I (T = 150)
 
