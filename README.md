@@ -113,12 +113,25 @@ RR-QPSO update.
 > methods beat Bayesian optimization is **withdrawn**; at matched budgets the
 > result reverses.
 >
+> **3. RR-QPSO and plain QPSO were never fairly compared.** The same audit
+> applied to our own method found **four confounds, all favouring plain QPSO**.
+> Two are serious: every RR-QPSO run in the project starts from the *same*
+> initial population (Sobol scramble hard-coded to `seed=0`, while QPSO gets an
+> independent start per seed), and RR-QPSO searches with **104 fewer
+> evaluations** at the 1,000 budget — worth **+0.021 to +0.026 in V×U**, which is
+> two to five times every RR-versus-QPSO difference this project has reported.
+> The claim that RR-QPSO is equivalent-to-or-worse-than QPSO is **withdrawn**;
+> the accurate statement is that the comparison cannot answer the question.
+> The reference-BO conclusion in (2) is unaffected — that gap is an order of
+> magnitude larger, and plain QPSO carries none of these handicaps.
+>
 > The particle-count sweep and the multi-objective results are **not** affected
 > by (1) and are retained below; their BO comparison points are affected by (2).
 >
 > Full study: [`docs/RESULTS.md`](docs/RESULTS.md) ·
 > Data index: [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) ·
-> Manuscript errata: [`docs/PAPER_ERRATA.md`](docs/PAPER_ERRATA.md)
+> Manuscript errata: [`docs/PAPER_ERRATA.md`](docs/PAPER_ERRATA.md) ·
+> Fairness audit: [`docs/FAIRNESS_AUDIT.md`](docs/FAIRNESS_AUDIT.md)
 
 All figures below use the 134-parameter, 20-qubit dynamic circuit, CUDA-Q 0.7.1
 (cuStateVec) on NVIDIA V100 GPUs, and report the validity–uniqueness product
