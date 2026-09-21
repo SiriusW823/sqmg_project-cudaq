@@ -188,14 +188,30 @@ class RRQPSO2(QPSO):
     同樣的 RNG 播種、同樣的初始化路徑（除了 Sobol 本身）。
 
     參數預設值取自論文：ρ=0.015、w_RR=0.70、w_V=w_U=0.15、τ_V=τ_U=0.5。
+
+    ★ 為何具名列出所有參數而不用 **kwargs
+    ------------------------------------
+    run_experiment.py 以 `inspect.signature(cls.__init__).parameters` 判斷
+    哪些超參數可以傳下去。若這裡寫成 `def __init__(self, *args, **kwargs)`，
+    signature 看不到任何具名參數，**所有覆寫都會被靜默丟棄**——包括 α 排程與
+    三個組件旗標。第一次 rrfair 批次（150 runs）就是這樣整批作廢的：
+    三個「消融」arm 其實跑的是完全相同的組態，而 qpso 用 α∈[0.3,1.2]、
+    rr_qpso2 卻退回類別預設的 [0.5,1.0]。
     """
     name = "rr_qpso2"
 
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("sobol_init", True)
-        kwargs.setdefault("rank_refined", True)
-        kwargs.setdefault("fitness_guided", True)
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args,
+                 alpha_max: float = 1.0, alpha_min: float = 0.5,
+                 sobol_init: bool = True, rank_refined: bool = True,
+                 fitness_guided: bool = True,
+                 rho: float = 0.015, w_rr: float = 0.70,
+                 w_v: float = 0.15, w_u: float = 0.15,
+                 tau_v: float = 0.5, tau_u: float = 0.5,
+                 **kwargs):
+        super().__init__(*args, alpha_max=alpha_max, alpha_min=alpha_min,
+                         sobol_init=sobol_init, rank_refined=rank_refined,
+                         fitness_guided=fitness_guided, rho=rho, w_rr=w_rr,
+                         w_v=w_v, w_u=w_u, tau_v=tau_v, tau_u=tau_u, **kwargs)
 
 
 # ===========================================================================

@@ -266,25 +266,53 @@ def main() -> None:
     # ── 執行 ─────────────────────────────────────────────────────────────
     cls = get_optimizer(args.optimizer)
 
-    # 只有接受 α 參數的最適化器（qpso / rr_qpso）才傳入；其餘忽略。
+    # ── 超參數覆寫 ────────────────────────────────────────────────────
+    # ★ 這裡曾經靜默丟棄使用者明確指定的參數，作廢了一整批 150 個 run。
+    #   原本的寫法是 `if v is not None and k in accepted`，而 `accepted` 來自
+    #   `inspect.signature(cls.__init__)`。當某個最適化器把參數收在 **kwargs
+    #   裡時，signature 看不到任何具名參數，於是 α 排程與組件旗標全部被丟掉，
+    #   兩個 arm 因此跑在不同的 α 下——正是這個研究要消除的那個混淆。
+    #
+    #   兩層修正：
+    #     1. 沿 MRO 蒐集所有祖先的具名參數，子類別用 **kwargs 轉傳也認得；
+    #     2. 使用者明確給了值卻送不進去時 **直接中止**，不再只印一行警告。
+    #        組態錯誤要在第一個 run 就炸掉，而不是在 150 個 run 之後才發現。
     import inspect
-    extra = {}
-    accepted = inspect.signature(cls.__init__).parameters
+    accepted = set()
+    for klass in cls.__mro__:
+        init = klass.__dict__.get("__init__")
+        if init is None:
+            continue
+        accepted |= {k for k, p in inspect.signature(init).parameters.items()
+                     if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+                     and k != "self"}
+
+    extra, rejected = {}, []
     for k, v in (("alpha_max", args.alpha_max), ("alpha_min", args.alpha_min),
                  ("ablate", args.ablate),
                  ("max_gp_points", args.max_gp_points),
                  ("tune_every", args.tune_every),
-                 # rr_qpso2 的三個組件旗標（消融用；None = 沿用類別預設）
+                 # 組件旗標（消融用；None = 沿用類別預設）
                  ("sobol_init", args.sobol_init),
                  ("rank_refined", args.rank_refined),
                  ("fitness_guided", args.fitness_guided),
                  ("rho", args.rho)):
-        if v is not None and k in accepted:
+        if v is None:
+            continue                      # 沒指定 → 沿用類別預設，正常
+        if k in accepted:
             extra[k] = v
-    if extra:
-        logger.info(f"  超參數覆寫    : {extra}")
-    elif args.alpha_max is not None or args.alpha_min is not None:
-        logger.info(f"  ⚠ {args.optimizer} 不接受 alpha 參數，忽略覆寫")
+        else:
+            rejected.append((k, v))
+
+    if rejected:
+        raise SystemExit(
+            f"[FATAL] 最適化器 '{args.optimizer}'（{cls.__name__}）不接受這些"
+            f"明確指定的參數：{dict(rejected)}\n"
+            f"  可接受的參數：{sorted(accepted - {'args', 'kwargs'})}\n"
+            "  → 若靜默忽略，這個 run 會跑在與你以為的不同組態下。"
+            "請修正指令或在該類別的 __init__ 具名列出參數。")
+
+    logger.info(f"  超參數覆寫    : {extra if extra else '（無，全用預設）'}")
 
     opt = cls(
         n_params          = D,
