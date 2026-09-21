@@ -178,6 +178,7 @@ def make_pooled_evaluator(
     report_hbahbd:  bool = False,
     shot_seed:      int = 0,
     smiles_log_dir: str = None,
+    retries:        int = 2,
 ) -> Callable[[np.ndarray], List[Tuple[float, float]]]:
     """
     常駐 worker pool 版的單節點評估器（v12.1 預設）。
@@ -198,7 +199,7 @@ def make_pooled_evaluator(
         # (V, U, HBA, HBD)；缺件時的預設值，供容錯路徑使用
         out: List[Tuple[float, ...]] = [(0.0, 0.0, 0.0, 0.0)] * M
         t0 = time.time()
-        lost = short = 0
+        lost = short = retried = 0
         first_err = None
         pool.ensure()
 
@@ -215,21 +216,50 @@ def make_pooled_evaluator(
 
             pool.run_chunk(tasks)
 
+            # ── 收結果；結果檔不存在 = 基礎設施失敗，必須重試 ──────────
+            # ★ 為何一定要重試（這段是實測代價換來的）
+            #   worker 偶爾會卡住不回應，pool 會重啟它，但送進去的那些粒子
+            #   永遠不會寫出結果檔，於是被以 0 計入。實測 150 個 run 裡
+            #   **146 個（97%）** 出現過這種批次，4,800 個批次中有 460 個
+            #   （9.6%）受影響，共 3,846 個粒子評估被誤記為 0。
+            #
+            #   後果不只是「少算幾個粒子」：0 是一個**錯誤的訊息**，它告訴
+            #   最適化器那塊參數空間毫無價值，而它其實從未被評估。更糟的是
+            #   它讓整條搜尋軌跡岔開——同一個 seed、同一組組態跑兩次會得到
+            #   不同結果，實測全距 0.015~0.027，比本專案追的大多數效應都大。
+            #   配對設計假設 seed 固定住 arm 以外的一切，那個假設因此不成立。
+            #
+            #   模組開頭早就寫明這個區分：檔案不存在 → 基礎設施問題 → 重試；
+            #   worker 自己算出 [0,0,0,0]（檔案存在）→ 真實的計算失敗 → 不重試。
+            #   pool 路徑先前漏了前半段，這裡補上。
+            pending = list(paths)
+            for attempt in range(1 + retries):
+                missing = []
+                for pidx, wpath, rpath in pending:
+                    try:
+                        arr = np.load(rpath)
+                        # worker 寫出的是 [V, U, HBA, HBD]，全部帶回。
+                        out[pidx] = tuple(float(x) for x in arr[:4])
+                        if len(arr) < 4:
+                            short += 1
+                    except Exception as e:                  # noqa: BLE001
+                        missing.append((pidx, wpath, rpath))
+                        if first_err is None:
+                            first_err = f"{type(e).__name__}: {str(e)[:120]}"
+                if not missing or attempt == retries:
+                    pending = missing
+                    break
+                logger.warning(
+                    f"  [pool] {len(missing)} 個粒子的結果檔不存在（基礎設施失敗），"
+                    f"重試 {attempt + 1}/{retries}")
+                pool.ensure()                     # 先把死掉的 worker 拉回來
+                retried += len(missing)
+                pool.run_chunk([(s, w, r, shot_seed)
+                                for s, (_, w, r) in enumerate(missing)])
+                pending = missing
+
+            lost += len(pending)                  # 重試後仍失敗才算真的丟失
             for pidx, wpath, rpath in paths:
-                try:
-                    arr = np.load(rpath)
-                    # ★ worker 寫出的是 [V, U, HBA, HBD]。此處原本只取前兩個，
-                    #   使得 hbahbd 目標永遠拿不到 HBA/HBD（fitness 退化為
-                    #   V×U×0.6 的常數縮放），且不會報錯。全部帶回。
-                    out[pidx] = tuple(float(x) for x in arr[:4])
-                    if len(arr) < 4:
-                        short += 1
-                except Exception as e:                      # noqa: BLE001
-                    # 退化為 (0,0,0,0) 是既定的容錯語意，但必須留下痕跡：
-                    # 否則「worker 算出 0」與「結果檔不存在」無法區分。
-                    lost += 1
-                    if first_err is None:
-                        first_err = f"{type(e).__name__}: {str(e)[:120]}"
                 for q in (wpath, rpath):
                     try:
                         os.remove(q)
@@ -240,10 +270,13 @@ def make_pooled_evaluator(
         valid = sum(1 for m in out if m[0] > 0)
         dt = time.time() - t0
         logger.info(f"  [pool] 批次 {M} 個粒子（{n} workers）有效 {valid}/{M}  "
-                    f"耗時 {dt:.1f}s  ({dt/max(M,1):.1f} s/eval)")
+                    f"耗時 {dt:.1f}s  ({dt/max(M,1):.1f} s/eval)"
+                    + (f"  重試 {retried}" if retried else ""))
         if lost:
-            logger.warning(f"  [pool] {lost}/{M} 個粒子的結果檔讀取失敗，"
-                           f"以 0 計入。首個錯誤：{first_err}")
+            # 重試過仍拿不到 → 這批次不再是「同一組態必然重現」的，明確標記。
+            logger.warning(
+                f"  [pool] ★ {lost}/{M} 個粒子重試 {retries} 次後仍無結果檔，"
+                f"以 0 計入 —— 本次執行已不具決定性。首個錯誤：{first_err}")
         if short:
             logger.warning(f"  [pool] {short}/{M} 個結果少於 4 個欄位；"
                            f"hbahbd 目標會因此失效（需 V,U,HBA,HBD）。")
