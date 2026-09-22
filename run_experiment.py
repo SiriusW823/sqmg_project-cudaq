@@ -246,12 +246,18 @@ def main() -> None:
             logger.info(f"  派工          : local pool（常駐 worker）GPU={gpu_ids}")
             smi_dir = (os.path.join(args.data_dir, f"{task}_smiles")
                        if args.smiles_log else None)
+            # QMG_RECYCLE_EVERY：worker 回收頻率（批次數）。0 = 停用。
+            # 預設 10 ≈ 18 分鐘壽命，避開長壽 worker 的退化區
+            # （失敗率 0h→0% / 2h→17.9% / 3h→22.2%，見 evaluator.maybe_recycle）。
+            recycle = int(os.environ.get("QMG_RECYCLE_EVERY", "10"))
+            logger.info(f"  worker 回收   : 每 {recycle} 個批次"
+                        if recycle > 0 else "  worker 回收   : 停用")
             batch_fn = make_pooled_evaluator(
                 cwg=cwg, logger=logger, gpu_ids=gpu_ids,
                 num_heavy_atom=args.num_heavy_atom, num_sample=args.num_sample,
                 backend=args.backend, timeout=args.subprocess_timeout,
                 report_hbahbd=report_hbahbd, shot_seed=args.shot_seed,
-                smiles_log_dir=smi_dir)
+                smiles_log_dir=smi_dir, recycle_every=recycle)
         else:
             from evaluator import make_local_evaluator
             logger.info(f"  派工          : local（每次評估開新行程）GPU={gpu_ids}")

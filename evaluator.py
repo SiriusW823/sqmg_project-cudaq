@@ -60,7 +60,8 @@ class _WorkerPool:
     """
 
     def __init__(self, gpu_ids, logger, num_heavy_atom, num_sample,
-                 backend, report_hbahbd, timeout, smiles_log_dir=None):
+                 backend, report_hbahbd, timeout, smiles_log_dir=None,
+                 recycle_every=10):
         self.gpu_ids   = [str(g) for g in gpu_ids]
         self.logger    = logger
         self.nha       = num_heavy_atom
@@ -72,6 +73,48 @@ class _WorkerPool:
         # ★ 多樣性研究：每個 worker slot 寫自己的檔，避免並行寫入交錯。
         #   聯集在分析時跨檔計算，worker 之間不需協調。
         self.smiles_log_dir = smiles_log_dir
+        # ★ worker 回收（見 maybe_recycle）
+        self.recycle_every = recycle_every
+        self._batches = 0
+
+    def maybe_recycle(self):
+        """跑滿 recycle_every 個批次就把所有 worker 重開。
+
+        ★ 為何需要：worker 存活越久越容易卡死
+        ------------------------------------
+        在 150 個 run 的 log 上量到的失敗率，依 **該 run 自身的年齡** 分桶：
+
+            0h → 0.0%   1h → 1.7%   2h → 17.9%   3h → 22.2%
+
+        對照「當下叢集併發數」分桶只有 6.0% vs 9.9%，幾乎沒有變化——
+        所以不是叢集爭用，是**單一 worker 用久了會退化**。
+        worker 的 Python 主迴圈本身沒有累積任何狀態，洩漏在
+        `gen.sample_molecule` 底下的 CUDA-Q 0.7.1 裡；那是釘死的相依
+        （只有 0.7.1 有 sm_70/V100 的 SASS），改不了。
+
+        所以繞過它：在進入退化區之前就重開。批次約 110s，
+        recycle_every=10 讓 worker 壽命約 18 分鐘，穩穩落在 0% 區間。
+        啟動成本 20–40s 攤提到 10 個批次上，約 3% 的額外開銷。
+        """
+        self._batches += 1
+        if self.recycle_every <= 0 or self._batches % self.recycle_every:
+            return
+        self.logger.info(
+            f"  [pool] 已跑 {self._batches} 個批次，回收全部 worker"
+            f"（避免長壽 worker 退化）")
+        for i, p in enumerate(self.procs):
+            if p is None:
+                continue
+            try:
+                p.stdin.close()
+                p.wait(timeout=10)
+            except Exception:                              # noqa: BLE001
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+            self.procs[i] = None
+        self.ensure()
 
     def _spawn(self, i: int):
         env = os.environ.copy()
@@ -179,6 +222,7 @@ def make_pooled_evaluator(
     shot_seed:      int = 0,
     smiles_log_dir: str = None,
     retries:        int = 2,
+    recycle_every:  int = 10,
 ) -> Callable[[np.ndarray], List[Tuple[float, float]]]:
     """
     常駐 worker pool 版的單節點評估器（v12.1 預設）。
@@ -188,7 +232,8 @@ def make_pooled_evaluator(
       - 其他值 ＝ 不同的 shot 序列（用於量測取樣不確定性）
     """
     pool = _WorkerPool(gpu_ids, logger, num_heavy_atom, num_sample,
-                       backend, report_hbahbd, timeout, smiles_log_dir)
+                       backend, report_hbahbd, timeout, smiles_log_dir,
+                       recycle_every)
     if smiles_log_dir:
         logger.info(f"  [pool] 相異 SMILES 記錄已開啟 → {smiles_log_dir}")
     n = len(gpu_ids)
@@ -201,6 +246,7 @@ def make_pooled_evaluator(
         t0 = time.time()
         lost = short = retried = 0
         first_err = None
+        pool.maybe_recycle()      # 長壽 worker 會退化，先看要不要重開
         pool.ensure()
 
         for start in range(0, M, n):
