@@ -127,7 +127,17 @@ def parse_args():
                    help="關閉常駐 worker，改用 v12.0 的每次開新行程模式。")
     p.add_argument("--shot_seed", type=int, default=0,
                    help="傳給 sample_molecule(random_seed=)。0 = 與歷史資料一致的"
-                        "確定性目標函數；改成其他值會換一條 shot 序列。")
+                        "確定性目標函數；改成其他值會換一條 shot 序列。"
+                        "搭配 --fresh_shot_noise 時是逐次種子的 base。")
+    # ── 同硬體、同牆鐘比較（PREREGISTRATION_anytime_vs_bo.md）─────────────
+    p.add_argument("--fresh_shot_noise", action="store_true", default=False,
+                   help="每次評估使用新的取樣種子 shot_seed×1e6+k（與上游 QMG 一致）；"
+                        "預設關閉＝整個 run 共用 --shot_seed（歷史行為）")
+    p.add_argument("--time_budget_h", type=float, default=None,
+                   help="牆鐘預算（小時）。到時不再開始新的評估批次。")
+    p.add_argument("--checkpoint_hours", type=str, default="",
+                   help="以逗號分隔的時間點（小時），在這些時刻保存 incumbent，"
+                        "例如 2,4,8,12,16,20,24")
 
     # ── 超參數覆寫（用於「參數公平」比較）────────────────────────────────
     #   ★ 為什麼需要：原版 QPSO 與 RR-QPSO 的 α 排程原本不同
@@ -197,6 +207,12 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
+    # 這些選項只在常駐 pool 路徑實作；其他路徑若靜默忽略，就會跑出與宣稱不同的實驗。
+    if args.fresh_shot_noise and not (args.dispatch == "local" and args.pool):
+        raise SystemExit("[FATAL] --fresh_shot_noise 只支援 --dispatch local 的常駐 pool。")
+    ckpt_h = [float(x) for x in args.checkpoint_hours.split(",") if x.strip()]
+    if ckpt_h and args.time_budget_h is not None and max(ckpt_h) > args.time_budget_h:
+        raise SystemExit("[FATAL] 檢查點不可晚於時間預算。")
 
     from optimizers import get_optimizer
     from qmg.utils import ConditionalWeightsGenerator
@@ -208,6 +224,7 @@ def main() -> None:
 
     max_evals = args.max_evals if args.max_evals else args.M * args.T
 
+
     logger.info("=" * 70)
     logger.info(f"SQMG 實驗 v12.0  task={task}")
     logger.info(f"  演算法        : {args.optimizer}")
@@ -216,6 +233,13 @@ def main() -> None:
     logger.info(f"  shots         : {args.num_sample}")
     logger.info(f"  seed          : {args.seed}")
     logger.info(f"  heavy atoms   : {args.num_heavy_atom}")
+    import socket
+    logger.info(f"  host          : {socket.gethostname()}  "
+                f"gpu_ids={args.gpu_ids}  n_gpus={args.n_gpus}  "
+                f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '(unset)')}")
+    logger.info(f"  shot noise    : "
+                + (f"fresh（base={args.shot_seed}）" if args.fresh_shot_noise
+                   else f"固定 shot_seed={args.shot_seed}（歷史行為）"))
     logger.info("=" * 70)
 
     cwg = ConditionalWeightsGenerator(
@@ -250,14 +274,20 @@ def main() -> None:
             # 預設 10 ≈ 18 分鐘壽命，避開長壽 worker 的退化區
             # （失敗率 0h→0% / 2h→17.9% / 3h→22.2%，見 evaluator.maybe_recycle）。
             recycle = int(os.environ.get("QMG_RECYCLE_EVERY", "10"))
-            logger.info(f"  worker 回收   : 每 {recycle} 個批次"
-                        if recycle > 0 else "  worker 回收   : 停用")
+            recycle_min = float(os.environ.get("QMG_RECYCLE_MINUTES", "0") or 0)
+            if recycle_min > 0:
+                logger.info(f"  worker 回收   : 每 {recycle_min:g} 分鐘（以時間計，各演算法一致）")
+            else:
+                logger.info(f"  worker 回收   : 每 {recycle} 個批次"
+                            if recycle > 0 else "  worker 回收   : 停用")
             batch_fn = make_pooled_evaluator(
                 cwg=cwg, logger=logger, gpu_ids=gpu_ids,
                 num_heavy_atom=args.num_heavy_atom, num_sample=args.num_sample,
                 backend=args.backend, timeout=args.subprocess_timeout,
                 report_hbahbd=report_hbahbd, shot_seed=args.shot_seed,
-                smiles_log_dir=smi_dir, recycle_every=recycle)
+                smiles_log_dir=smi_dir, recycle_every=recycle,
+                fresh_shot_noise=args.fresh_shot_noise,
+                recycle_minutes=recycle_min)
         else:
             from evaluator import make_local_evaluator
             logger.info(f"  派工          : local（每次評估開新行程）GPU={gpu_ids}")
@@ -334,6 +364,11 @@ def main() -> None:
         **extra,
     )
 
+    if args.time_budget_h is not None:
+        opt.time_budget_s = float(args.time_budget_h) * 3600.0
+    if ckpt_h:
+        opt.checkpoint_s = [h * 3600.0 for h in ckpt_h]
+
     if opt.n_evals >= max_evals:
         logger.info(f"已完成 {opt.n_evals}/{max_evals} 次評估，無需再跑。")
         return
@@ -351,6 +386,12 @@ def main() -> None:
             "seed": args.seed, "M": args.M, "T": args.T,
             "max_evals": max_evals, "n_evals": opt.n_evals,
             "num_sample": args.num_sample,
+            "shot_seed": args.shot_seed,
+            "fresh_shot_noise": args.fresh_shot_noise,
+            "time_budget_h": args.time_budget_h,
+            "checkpoint_hours": ckpt_h,
+            "host": socket.gethostname(),
+            "gpu_ids": args.gpu_ids, "n_gpus": args.n_gpus,
             "best_fitness": opt.best_f,
             "best_validity": opt.best_v, "best_uniqueness": opt.best_u,
             "elapsed_s": round(elapsed, 1),

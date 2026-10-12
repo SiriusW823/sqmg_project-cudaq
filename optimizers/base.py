@@ -106,6 +106,19 @@ class BaseOptimizer(ABC):
         self.best_u    = 0.0
         self.history: List[dict] = []
 
+        # ── 時間預算與時間檢查點（同硬體、同牆鐘的比較用）───────────────
+        #   預設關閉，所有既有實驗的行為不變。由 run_experiment.py 在建構後
+        #   以屬性設定（刻意不經 __init__ 參數，避免再踩一次「子類別 **kwargs
+        #   讓參數被靜默丟棄」的坑，見 7c09dcb）。
+        #   time_budget_s : 牆鐘預算（秒）。下一批評估開始前若已用完 → 結束。
+        #   checkpoint_s  : 在這些時間點保存「當時」的最佳解（incumbent），
+        #                   供事後以獨立取樣種子重評分。
+        self.time_budget_s: Optional[float] = None
+        self.checkpoint_s: List[float] = []
+        self._ckpt_done: set = set()
+        self._data_dir  = data_dir
+        self._task_name = task_name
+
         os.makedirs(data_dir, exist_ok=True)
         self._csv_path   = os.path.join(data_dir, f"{task_name}.csv")
         self._state_path = os.path.join(data_dir, f"{task_name}_state.npz")
@@ -225,6 +238,12 @@ class BaseOptimizer(ABC):
         """
         if self.remaining <= 0:
             raise BudgetExhausted()
+        # 時間預算：在「開始」一批之前檢查。最後一批可能跨過預算線才結束；
+        # 那一批的結果仍寫進 CSV（elapsed_s 會 > 預算），但「預算時刻的
+        # incumbent」由檢查點機制以批次開始前的最佳解記錄，分析一律以檢查點為準。
+        if (self.time_budget_s is not None and self._t0 is not None
+                and time.time() - self._t0 >= self.time_budget_s):
+            raise BudgetExhausted()
 
         X = np.atleast_2d(np.asarray(X, dtype=np.float64))
         truncated = False
@@ -235,7 +254,15 @@ class BaseOptimizer(ABC):
         if self._t0 is None:
             self._t0 = time.time()
 
+        # 批次開始前的最佳解：這一批的結果要到批次結束才「存在」，
+        # 所以落在本批進行期間的檢查點，其 incumbent 是這個值。
+        pre = (None if self.best_x is None else self.best_x.copy(),
+               self.best_f, self.best_v, self.best_u, self.n_evals)
+
         results = self.batch_eval(X)
+
+        if self.checkpoint_s:
+            self._save_due_checkpoints(time.time() - self._t0, pre)
 
         fits = np.empty(len(results), dtype=np.float64)
         for i, metrics in enumerate(results):
@@ -279,13 +306,55 @@ class BaseOptimizer(ABC):
         # 下一次呼叫 _evaluate_metrics 時才丟 BudgetExhausted。
         return list(results)
 
+    # ----------------------------------------------------------- checkpoints
+    def _write_checkpoint(self, t_s: float, inc, carried: bool) -> None:
+        x, f, v, u, n = inc
+        tag = f"{t_s / 3600:g}h"
+        path = os.path.join(self._data_dir, f"{self._task_name}_ckpt_{tag}.npz")
+        np.savez(path,
+                 x=(np.full(self.D, np.nan) if x is None else x),
+                 f=f, v=v, u=u, n_evals=n, t_s=t_s,
+                 elapsed_at_save=(time.time() - self._t0) if self._t0 else 0.0,
+                 carried=carried)
+        self.logger.info(
+            f"  [checkpoint] t={tag:>6}  incumbent f={f:.4f} (V={v:.3f} U={u:.3f})  "
+            f"n_evals={n}" + ("  [final incumbent: no batch completed after this time]" if carried else ""))
+
+    def _save_due_checkpoints(self, t_end: float, pre) -> None:
+        """批次在 t_end 結束；所有 t ≤ t_end 且尚未存的檢查點，用批次前的最佳解。"""
+        for t_s in sorted(self.checkpoint_s):
+            if t_s in self._ckpt_done or t_s > t_end:
+                continue
+            self._write_checkpoint(t_s, pre, carried=False)
+            self._ckpt_done.add(t_s)
+
+    def _finalize_checkpoints(self) -> None:
+        """run 結束時，尚未到達的檢查點一律以最終最佳解補上（之後不會再變）。"""
+        cur = (None if self.best_x is None else self.best_x.copy(),
+               self.best_f, self.best_v, self.best_u, self.n_evals)
+        for t_s in sorted(self.checkpoint_s):
+            if t_s not in self._ckpt_done:
+                self._write_checkpoint(t_s, cur, carried=True)
+                self._ckpt_done.add(t_s)
+
     # ------------------------------------------------------------------ run
     def run(self) -> Tuple[np.ndarray, float]:
+        # 時間預算的 run 不可續跑：續跑會讓牆鐘從零重算，預算就不再是預算。
+        if self.time_budget_s is not None and self.n_evals > 0:
+            raise RuntimeError(
+                f"[{self.name}] 這是有時間預算的 run（{self.time_budget_s/3600:g} h），"
+                f"但偵測到既有進度 n_evals={self.n_evals}。續跑會重設牆鐘、"
+                "使時間預算失效。→ 依預登記，此 run 作廢；不得續跑。")
         self._t0 = time.time()
         self.logger.info("=" * 70)
         self.logger.info(f"最適化器：{self.name}")
         self.logger.info(f"  維度 D        : {self.D}")
         self.logger.info(f"  評估預算      : {self.max_evals}")
+        if self.time_budget_s is not None:
+            self.logger.info(f"  時間預算      : {self.time_budget_s/3600:g} h（牆鐘）")
+        if self.checkpoint_s:
+            self.logger.info(f"  時間檢查點    : "
+                             f"{[f'{t/3600:g}h' for t in sorted(self.checkpoint_s)]}")
         self.logger.info(f"  批次大小      : {self.batch_size}")
         self.logger.info(f"  seed          : {self.seed}")
         self.logger.info(f"  CSV           : {self._csv_path}")
@@ -295,6 +364,9 @@ class BaseOptimizer(ABC):
             self._optimize()
         except BudgetExhausted:
             self.logger.info(f"  [{self.name}] 預算用盡，正常結束。")
+
+        if self.checkpoint_s:
+            self._finalize_checkpoints()
 
         elapsed = time.time() - self._t0
         self.logger.info("=" * 70)

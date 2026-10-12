@@ -44,6 +44,31 @@ REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 # ===========================================================================
+# 逐次評估的取樣種子（fresh shot noise）
+# ===========================================================================
+#   歷來的實驗整個 run 共用一個 shot seed（預設 0），等於對「一條固定的亂數流」
+#   做最佳化：最適化器會挑到剛好適合那條亂數流的參數，seed 0 因此總是 24 次
+#   重抽中的最大值（PAPER_ERRATA §3）。上游 QMG 用的是未設種子的 Aer sampler，
+#   每次評估都是新的雜訊。fresh 模式讓每次評估拿到自己的種子：
+#       seed = base × 1,000,000 + k      （k = 該 run 內第 k 次評估，從 0 起）
+#   base 即 run 的 --shot_seed。同一 run 內絕不重複；不同 run 只要 base 不同也
+#   不重複。獨立重評分（benchmark/test_score.py）用 ≥ TEST_SEED_BASE 的種子，
+#   與最佳化期間的種子空間不相交。
+SHOT_SEED_STRIDE = 1_000_000
+TEST_SEED_BASE   = 2_000_000_000          # < 2^31，與最佳化種子空間不相交
+
+
+def shot_seed_for(base: int, k: int) -> int:
+    """第 k 次評估（0 起）在 fresh 模式下的取樣種子。"""
+    if not (0 <= base < TEST_SEED_BASE // SHOT_SEED_STRIDE):
+        raise ValueError(f"shot_seed base 必須在 [0, {TEST_SEED_BASE // SHOT_SEED_STRIDE})，"
+                         f"收到 {base}")
+    if not (0 <= k < SHOT_SEED_STRIDE):
+        raise ValueError(f"單一 run 的評估次數超過 {SHOT_SEED_STRIDE}，種子會與下一個 base 重疊")
+    return base * SHOT_SEED_STRIDE + k
+
+
+# ===========================================================================
 # 單節點：常駐 worker pool（v12.1，預設）
 # ===========================================================================
 
@@ -61,7 +86,7 @@ class _WorkerPool:
 
     def __init__(self, gpu_ids, logger, num_heavy_atom, num_sample,
                  backend, report_hbahbd, timeout, smiles_log_dir=None,
-                 recycle_every=10):
+                 recycle_every=10, recycle_minutes=0.0):
         self.gpu_ids   = [str(g) for g in gpu_ids]
         self.logger    = logger
         self.nha       = num_heavy_atom
@@ -76,6 +101,13 @@ class _WorkerPool:
         # ★ worker 回收（見 maybe_recycle）
         self.recycle_every = recycle_every
         self._batches = 0
+        # 以「時間」回收（recycle_minutes > 0 時取代批次計數）。
+        #   批次計數只在批次大小相同時公平：序列式 BO 一批只有 1 個評估，
+        #   每 10 批回收一次等於每 10 次評估就付一次 20–40 s 的啟動成本，
+        #   而族群式方法是每 640 次評估才付一次。退化本來就是隨「年齡」發生的
+        #   （見下方失敗率），用時間回收對所有演算法一致。
+        self.recycle_minutes = float(recycle_minutes or 0.0)
+        self._last_recycle = time.time()
 
     def maybe_recycle(self):
         """跑滿 recycle_every 個批次就把所有 worker 重開。
@@ -97,11 +129,19 @@ class _WorkerPool:
         啟動成本 20–40s 攤提到 10 個批次上，約 3% 的額外開銷。
         """
         self._batches += 1
-        if self.recycle_every <= 0 or self._batches % self.recycle_every:
-            return
-        self.logger.info(
-            f"  [pool] 已跑 {self._batches} 個批次，回收全部 worker"
-            f"（避免長壽 worker 退化）")
+        if self.recycle_minutes > 0:
+            age_min = (time.time() - self._last_recycle) / 60.0
+            if age_min < self.recycle_minutes:
+                return
+            self.logger.info(
+                f"  [pool] worker 已存活 {age_min:.1f} 分（≥ {self.recycle_minutes:g}），"
+                f"回收全部 worker（避免長壽 worker 退化）")
+        else:
+            if self.recycle_every <= 0 or self._batches % self.recycle_every:
+                return
+            self.logger.info(
+                f"  [pool] 已跑 {self._batches} 個批次，回收全部 worker"
+                f"（避免長壽 worker 退化）")
         for i, p in enumerate(self.procs):
             if p is None:
                 continue
@@ -115,6 +155,7 @@ class _WorkerPool:
                     pass
             self.procs[i] = None
         self.ensure()
+        self._last_recycle = time.time()
 
     def _spawn(self, i: int):
         env = os.environ.copy()
@@ -223,21 +264,37 @@ def make_pooled_evaluator(
     smiles_log_dir: str = None,
     retries:        int = 2,
     recycle_every:  int = 10,
+    fresh_shot_noise: bool = False,
+    recycle_minutes: float = 0.0,
 ) -> Callable[[np.ndarray], List[Tuple[float, float]]]:
     """
     常駐 worker pool 版的單節點評估器（v12.1 預設）。
 
     `shot_seed` 傳給 `sample_molecule(random_seed=...)`：
-      - 0（預設）＝ 與歷史資料一致的確定性目標函數
-      - 其他值 ＝ 不同的 shot 序列（用於量測取樣不確定性）
+      - fresh_shot_noise=False（預設）：每次評估都用同一個 shot_seed
+        ＝ 與歷史資料一致的確定性目標函數
+      - fresh_shot_noise=True：第 k 次評估用 shot_seed_for(shot_seed, k)，
+        每次評估都是新的取樣雜訊（與上游 QMG 一致）
     """
     pool = _WorkerPool(gpu_ids, logger, num_heavy_atom, num_sample,
                        backend, report_hbahbd, timeout, smiles_log_dir,
-                       recycle_every)
+                       recycle_every, recycle_minutes)
     if smiles_log_dir:
         logger.info(f"  [pool] 相異 SMILES 記錄已開啟 → {smiles_log_dir}")
     n = len(gpu_ids)
     tmpdir = tempfile.gettempdir()
+    seed_state = {"k": 0}
+    if fresh_shot_noise:
+        shot_seed_for(shot_seed, 0)                    # 先驗證 base 合法
+        logger.info(f"  [pool] fresh shot noise：第 k 次評估的種子 = "
+                    f"{shot_seed}×{SHOT_SEED_STRIDE:,} + k")
+
+    def _next_seed() -> int:
+        if not fresh_shot_noise:
+            return shot_seed
+        s_ = shot_seed_for(shot_seed, seed_state["k"])
+        seed_state["k"] += 1
+        return s_
 
     def batch_evaluate(positions: np.ndarray) -> List[Tuple[float, ...]]:
         M = positions.shape[0]
@@ -246,6 +303,7 @@ def make_pooled_evaluator(
         t0 = time.time()
         lost = short = retried = 0
         first_err = None
+        seed_lo = seed_hi = None
         pool.maybe_recycle()      # 長壽 worker 會退化，先看要不要重開
         pool.ensure()
 
@@ -257,8 +315,12 @@ def make_pooled_evaluator(
                 wpath = os.path.join(tmpdir, f"qmg_w_{uid}.npy")
                 rpath = os.path.join(tmpdir, f"qmg_r_{uid}.npy")
                 np.save(wpath, cwg.apply_chemistry_constraint(positions[pidx].copy()))
-                tasks.append((slot, wpath, rpath, shot_seed))
-                paths.append((pidx, wpath, rpath))
+                sd = _next_seed()           # 重試時沿用同一個種子（同一次評估）
+                if seed_lo is None:
+                    seed_lo = sd
+                seed_hi = sd
+                tasks.append((slot, wpath, rpath, sd))
+                paths.append((pidx, wpath, rpath, sd))
 
             pool.run_chunk(tasks)
 
@@ -281,7 +343,7 @@ def make_pooled_evaluator(
             pending = list(paths)
             for attempt in range(1 + retries):
                 missing = []
-                for pidx, wpath, rpath in pending:
+                for pidx, wpath, rpath, sd in pending:
                     try:
                         arr = np.load(rpath)
                         # worker 寫出的是 [V, U, HBA, HBD]，全部帶回。
@@ -289,7 +351,7 @@ def make_pooled_evaluator(
                         if len(arr) < 4:
                             short += 1
                     except Exception as e:                  # noqa: BLE001
-                        missing.append((pidx, wpath, rpath))
+                        missing.append((pidx, wpath, rpath, sd))
                         if first_err is None:
                             first_err = f"{type(e).__name__}: {str(e)[:120]}"
                 if not missing or attempt == retries:
@@ -300,12 +362,12 @@ def make_pooled_evaluator(
                     f"重試 {attempt + 1}/{retries}")
                 pool.ensure()                     # 先把死掉的 worker 拉回來
                 retried += len(missing)
-                pool.run_chunk([(s, w, r, shot_seed)
-                                for s, (_, w, r) in enumerate(missing)])
+                pool.run_chunk([(s, w, r, sd)
+                                for s, (_, w, r, sd) in enumerate(missing)])
                 pending = missing
 
             lost += len(pending)                  # 重試後仍失敗才算真的丟失
-            for pidx, wpath, rpath in paths:
+            for pidx, wpath, rpath, _sd in paths:
                 for q in (wpath, rpath):
                     try:
                         os.remove(q)
@@ -317,7 +379,8 @@ def make_pooled_evaluator(
         dt = time.time() - t0
         logger.info(f"  [pool] 批次 {M} 個粒子（{n} workers）有效 {valid}/{M}  "
                     f"耗時 {dt:.1f}s  ({dt/max(M,1):.1f} s/eval)"
-                    + (f"  重試 {retried}" if retried else ""))
+                    + (f"  重試 {retried}" if retried else "")
+                    + (f"  shot seeds {seed_lo}–{seed_hi}" if fresh_shot_noise else ""))
         if lost:
             # 重試過仍拿不到 → 這批次不再是「同一組態必然重現」的，明確標記。
             logger.warning(

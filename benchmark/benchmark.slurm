@@ -52,6 +52,11 @@ EXTRA=""
 [ -n "${FITNESS_GUIDED:-}" ] && EXTRA="$EXTRA --fitness_guided $FITNESS_GUIDED"
 [ -n "${RHO:-}" ]            && EXTRA="$EXTRA --rho $RHO"
 [ "${SMILES_LOG:-0}" = "1" ] && EXTRA="$EXTRA --smiles_log"
+# 同硬體、同牆鐘比較（PREREGISTRATION_anytime_vs_bo.md）
+[ -n "${GPU_IDS:-}" ]          && EXTRA="$EXTRA --gpu_ids $GPU_IDS"
+[ "${FRESH_SHOT_NOISE:-0}" = "1" ] && EXTRA="$EXTRA --fresh_shot_noise"
+[ -n "${TIME_BUDGET_H:-}" ]    && EXTRA="$EXTRA --time_budget_h $TIME_BUDGET_H"
+[ -n "${CHECKPOINT_HOURS:-}" ] && EXTRA="$EXTRA --checkpoint_hours $CHECKPOINT_HOURS"
 
 # ── ax_bo 專用：跨環境執行 ──────────────────────────────────────────────
 # ax-platform 0.4.3 會拉 CUDA 13 的 torch，與 cuda-quantum 0.7.1 的 CUDA 12
