@@ -136,3 +136,73 @@ Stated in advance, so it is not invented afterwards:
 Whatever the outcome, **it is reported.** The previous null was retracted for
 being unfair, not for being inconvenient; the same standard applies to a
 positive result.
+
+---
+
+## 8. Amendment — 2026-10-12, before any data from the corrected batch
+
+Committed before the corrected batch is submitted. The commit timestamp is the
+record.
+
+### 8.1 The first batch is void
+
+The first execution (150 runs, `results_rrfair/`, 2026-09-17 to 09-21) ran
+with every hyperparameter override silently dropped. `RRQPSO2.__init__` took
+`(*args, **kwargs)`, so `run_experiment.py`'s signature-based filter saw no
+named parameters (fixed in `7c09dcb`, which also makes an undeliverable override
+fatal). The logs show `⚠ rr_qpso2 不接受 alpha 參數，忽略覆寫` for every
+`rr_qpso2` arm. Consequences:
+
+- the three ablation arms ran the same configuration as `rr2` — their 30 values
+  at 500 evaluations are identical;
+- `rr_qpso2` used α ∈ [0.5, 1.0] while `qpso` used [0.3, 1.2].
+
+**§5.1 did not catch this.** Both of its conditions passed (30 distinct starts
+per arm, equal evaluation counts). It checks the harness, not the
+configuration. §8.4 adds the missing check.
+
+### 8.2 What had been seen when this was written
+
+The void batch was analysed with the §5 script on 2026-10-12:
+H1 @2,000 Δ = −0.0045, 95% CI [−0.0165, +0.0185], 14/16, p = 0.55;
+H2 @500 Δ = +0.033, CI [+0.002, +0.061], 21/9, p = 0.013. The `qpso` arm of the
+void batch ran exactly the configuration it will run again, so its 30 values for
+seeds 300–329 are known.
+
+This does not touch any analysis choice: hypotheses, endpoints, tests, decision
+rules and the stopping rule were fixed in `894ad76` and are unchanged. The seeds
+are also kept at 300–329 — switching seeds now would itself be a choice made
+after seeing data.
+
+### 8.3 Corrected batch — design identical to §4 except
+
+| Item | Value |
+|---|---|
+| Code | `539ac61` or later; includes `7c09dcb` plus the harness robustness fixes `4fbb29b` and `c6be0e5`. `SQMG/scripts/verify_rrqpso2.sh` (six sections, including the new override checks) passed on 2026-10-12 |
+| Output | `results_rrfair2/` — the void batch stays untouched in `results_rrfair/` |
+| Submission order | all `qpso` and `rr_qpso2` jobs (H1/H2) before the three ablation arms, so the primary comparison completes first |
+| Everything else | as §4: 5 arms, seeds 300–329, M = 64, 2,000 evaluations, 1,000 shots, α ∈ [0.3, 1.2] for all arms, ρ/w/τ at the manuscript's values |
+
+### 8.4 Added mandatory check — §5.1(c), configuration
+
+Before any test, from each run's console log: the logged override line must
+contain `alpha_max: 1.2` and `alpha_min: 0.3` for every arm, and the arm's own
+flag (`sobol_init`, `rank_refined` or `fitness_guided` = False) for each
+ablation arm. In addition the four `rr_qpso2`-family arms must **not** be
+identical at 500 evaluations. If any condition fails, the batch is void.
+
+### 8.5 Deadline and interim looks
+
+The batch overlaps a manuscript deadline (2026-10-20), which is exactly when an
+early look is tempting. Rules:
+
+- No H1/H2 statistic, and no per-arm best-so-far value, is computed until all
+  60 `qpso` and `rr_qpso2` runs have reached 2,000 evaluations and §5.1(a–c)
+  pass. Monitoring is limited to job counts, evaluation progress and the
+  §5.1 checks (`SQMG/scripts/rrfair2_status.sh` prints no fitness values).
+- If H1 is not complete when the manuscript must be finalised, the manuscript
+  describes this study as pre-registered and in progress, with no partial
+  result.
+- Ablation arms are analysed once, after all 150 runs complete.
+
+The stopping rule of §6 is unchanged.
