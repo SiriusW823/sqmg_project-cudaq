@@ -136,8 +136,8 @@ def parse_args():
     p.add_argument("--time_budget_h", type=float, default=None,
                    help="牆鐘預算（小時）。到時不再開始新的評估批次。")
     p.add_argument("--checkpoint_hours", type=str, default="",
-                   help="以逗號分隔的時間點（小時），在這些時刻保存 incumbent，"
-                        "例如 2,4,8,12,16,20,24")
+                   help="以冒號（或逗號）分隔的時間點（小時），在這些時刻保存 incumbent，"
+                        "例如 2:4:8:12:16:20:24。經 sbatch --export 傳遞時必須用冒號。")
 
     # ── 超參數覆寫（用於「參數公平」比較）────────────────────────────────
     #   ★ 為什麼需要：原版 QPSO 與 RR-QPSO 的 α 排程原本不同
@@ -210,7 +210,10 @@ def main() -> None:
     # 這些選項只在常駐 pool 路徑實作；其他路徑若靜默忽略，就會跑出與宣稱不同的實驗。
     if args.fresh_shot_noise and not (args.dispatch == "local" and args.pool):
         raise SystemExit("[FATAL] --fresh_shot_noise 只支援 --dispatch local 的常駐 pool。")
-    ckpt_h = [float(x) for x in args.checkpoint_hours.split(",") if x.strip()]
+    # 以冒號或逗號分隔。★ 經 sbatch --export 傳遞時必須用冒號：--export 以逗號切分
+    #   變數，"2,4,8" 會被截成 "2"（冒煙測試實際發生過）。
+    import re as _re
+    ckpt_h = [float(x) for x in _re.split(r"[,:]", args.checkpoint_hours) if x.strip()]
     if ckpt_h and args.time_budget_h is not None and max(ckpt_h) > args.time_budget_h:
         raise SystemExit("[FATAL] 檢查點不可晚於時間預算。")
 

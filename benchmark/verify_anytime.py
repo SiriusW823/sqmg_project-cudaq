@@ -97,6 +97,10 @@ for flag in ("--fresh_shot_noise", "--time_budget_h", "--checkpoint_hours"):
 r = subprocess.run([sys.executable, "run_experiment.py", "--optimizer", "qpso", "--no_pool",
                     "--fresh_shot_noise", "--data_dir", tempfile.mkdtemp()], capture_output=True, text=True)
 check("--fresh_shot_noise 搭配非 pool 路徑會中止", r.returncode != 0 and "fresh_shot_noise" in (r.stdout + r.stderr))
+import re as _re
+src = open("run_experiment.py", encoding="utf-8").read()
+check("檢查點字串接受冒號分隔（sbatch --export 會切逗號）", 'split(r"[,:]"' in src)
+check("冒號字串解析成 7 個時間點", [float(x) for x in _re.split(r"[,:]", "2:4:8:12:16:20:24") if x] == [2, 4, 8, 12, 16, 20, 24])
 sl = open("benchmark/benchmark.slurm").read()
 for v in ("GPU_IDS", "FRESH_SHOT_NOISE", "TIME_BUDGET_H", "CHECKPOINT_HOURS"):
     check(f"benchmark.slurm 轉傳 {v}", v in sl)
@@ -104,6 +108,7 @@ pa = open("benchmark/paired_anytime.slurm").read()
 check("配對腳本：兩臂皆 fresh noise、同一 SHOT_SEED", "FRESH_SHOT_NOISE=1" in pa and 'SHOT_SEED="$SEED"' in pa)
 check("配對腳本：以時間回收 worker（各演算法一致）", "QMG_RECYCLE_MINUTES=18" in pa and "QMG_RECYCLE_EVERY=0" in pa)
 check("配對腳本：population arm 帶 α 覆寫", "ALPHA_MAX=${ALPHA_MAX:-1.2}" in pa)
+check("配對腳本：拒絕含逗號的 CHECKPOINT_HOURS", "CHECKPOINT_HOURS 含逗號" in pa)
 
 print("\n" + ("全部通過" if ok else "★ 有項目未通過，不可送實驗"))
 sys.exit(0 if ok else 1)

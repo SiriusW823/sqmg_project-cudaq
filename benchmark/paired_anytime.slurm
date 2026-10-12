@@ -14,7 +14,8 @@
 #
 #   sbatch -N1 -p nchc --exclusive --gres=gpu:8 --time=26:00:00 --no-requeue \
 #     --export=ALL,ARM_A=rr_qpso2,ARM_B=ax_bo,SEED=500,DATA_DIR=results_anytime,\
-#              TIME_BUDGET_H=24,CHECKPOINT_HOURS=2,4,8,12,16,20,24 \
+#              TIME_BUDGET_H=24,CHECKPOINT_HOURS=2:4:8:12:16:20:24 \
+#   ★ CHECKPOINT_HOURS 必須用冒號：--export 以逗號切分變數，"2,4,8" 會被截成 "2"。
 #     benchmark/paired_anytime.slurm
 # ==============================================================================
 #SBATCH -p nchc
@@ -30,6 +31,11 @@ ARM_A=${ARM_A:?}; ARM_B=${ARM_B:?}; SEED=${SEED:?}
 DATA_DIR=${DATA_DIR:?}; TIME_BUDGET_H=${TIME_BUDGET_H:?}; CHECKPOINT_HOURS=${CHECKPOINT_HOURS:?}
 SHOTS=${SHOTS:-1000}; M=${M:-64}; MAX_EVALS=${MAX_EVALS:-12288}
 mkdir -p "$DATA_DIR"
+
+case "$CHECKPOINT_HOURS" in
+  *,*) echo "[FATAL] CHECKPOINT_HOURS 含逗號（$CHECKPOINT_HOURS）；請用冒號分隔"; exit 3 ;;
+esac
+echo "  budget=${TIME_BUDGET_H}h  checkpoints=${CHECKPOINT_HOURS}  shots=${SHOTS}  max_evals=${MAX_EVALS}"
 
 NGPU=$(nvidia-smi -L 2>/dev/null | wc -l)
 echo "=== paired start $(date)  host=$(hostname)  job=${SLURM_JOB_ID:-}  GPUs visible=$NGPU ==="
