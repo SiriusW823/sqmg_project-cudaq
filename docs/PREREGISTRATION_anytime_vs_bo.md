@@ -249,3 +249,11 @@ outputs `results_anytime_smoke{,2,3}/`. Excluded from every analysis.
    hypothesis, endpoint, test, seed set or decision rule is changed.
 
 §4.5 is superseded as to `MAX_EVALS` and the α horizon; everything else stands.
+
+## 11. Analysis code, committed before data (2026-10-12)
+
+`benchmark/anytime_analyze.py` implements §5 exactly: the per-pair checks
+(a)–(e) with the exclusion and void rules, H1/H2 with Holm, the effect sizes
+and bootstrap CIs (seed 20261012), and the descriptive table. It was exercised
+only on synthetic files. The confirmatory pairs are jobs **111063–111086**,
+submitted 2026-10-12 20:54, queued behind `rrfair2`.
