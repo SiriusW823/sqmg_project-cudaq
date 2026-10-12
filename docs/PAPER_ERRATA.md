@@ -16,7 +16,7 @@ the *absence* of evidence, that is said explicitly.
 |---|---|---|---|
 | 1 | The RR-QPSO vs QPSO comparison is single-seed, and the reported gap is half of one seed-to-seed standard deviation | High | Fig. 2, §IV-A, Conclusion |
 | 2 | Fig. 2's "QPSO" and "QPSO + Sobol Init." bars are swapped; the text's conclusion about Sobol is backwards | High | Fig. 2, §IV-A |
-| 3 | The BO baseline V×U = 0.902 has no matching run in the codebase | Critical | Abstract, Fig. 2, Table I, §IV-B, §IV-C, Conclusion |
+| 3 | The BO baseline V×U = 0.902 has no matching run in the codebase — **traced 2026-10-12: it is the published Chen et al. sample, not a re-run, at ~1/16 of the evaluation budget** | Critical | Abstract, Fig. 2, Table I, §IV-B, §IV-C, Conclusion |
 
 Separately, new data (§4 below) shows the BO baseline itself was
 under-configured, which changes the manuscript's principal claim.
@@ -190,6 +190,55 @@ Locate the run that produced 0.902, or re-run the BO baseline and report the
 number obtained. If the figure came from the literature, §IV-A's sentence must
 be corrected to say so.
 
+### Resolution — 2026-10-12: 0.902 is the upstream published sample
+
+Traced in the upstream repository (<https://github.com/PEESEgroup/QMG>, commit
+`0f514ad`); reproducible with `python benchmark/trace_upstream_bo.py <clone>`.
+
+| Figure | Source in upstream | Exact value |
+|---|---|---|
+| **0.902** (V 94.2 / U 95.7) — the preprint's BO bar | `results_chemistry_constraint_bo/sample_unconditional_9_4_501.pkl`: 5,000 molecules sampled from the parameters of BO trial 501 — the QMG bar of Chen et al. Fig. 3a ("we generated 5000 samples") | V = 0.9420, U = 0.9567, **V×U = 0.9012** (the printed 90.2 is 94.2 × 95.7, a product of rounded percentages) |
+| **0.8834** (V 95.5 / U 92.5) — hard-coded in `qpso_optimizer_ae.py` | `unconditional_9_4.csv`: the best evaluation *during* BO, trial 536, at **10,000** shots (not 5,000 as the code comment says) | V = 0.9545, U = 0.9248, **V×U = 0.8827** (0.8834 is again a product of rounded percentages) |
+
+So the number is real and traceable, and the erratum changes character:
+
+1. **It is a literature value, not a re-run.** §IV-A's sentence "re-run under the
+   same implementation and evaluation protocol rather than taken directly from
+   the literature" is false and must be removed.
+2. **The budgets differ by an order of magnitude.** Chen et al.'s BO for this
+   task spent **603 evaluations × 10,000 shots** (403 carried over from earlier
+   rounds via `constrained_bo_further_opt.py` + 200 new GPEI trials; validity is
+   a multiple of 1/10,000 on every row). The preprint's RR-QPSO runs spent
+   9,664 × 5,000 (M = 64: **16×** the evaluations, 8× the shots) and
+   19,456 × 5,000 (M = 128: **32×** the evaluations, 16× the shots). Reviewer
+   concerns about unmatched budgets were correct.
+3. **The noise protocols differ.** Upstream draws fresh shot noise for every
+   evaluation (unseeded Aer sampler) and the 0.9012 is an independent 5,000-shot
+   resample. The preprint's 0.930 / 0.942 are best-of-run values under one fixed
+   shot seed (`sample_molecule(random_seed=0)`), which the optimizer can overfit.
+   Re-scored with 24 fresh shot seeds × 5,000 shots
+   (`benchmark/shot_seed_test.py`, 2026-07-31; cluster
+   `results_revalidate/shotseed_*.json`), seed 0 is the maximum of all 24 draws
+   in every case:
+
+   | Run (n = 1 optimizer seed) | Evaluations | Reported (seed 0) | Mean of 24 shot seeds | SD |
+   |---|---|---|---|---|
+   | RR-QPSO M = 128 (`results_sweep_M128`) | 19,456 | 0.9420 | **0.9308** | 0.0039 |
+   | RR-QPSO M = 64 (`results_v8`) | 9,664 | 0.9310 | **0.9078** | 0.0061 |
+   | QPSO, random init (`results_qpso_nosobol`) | 9,664 | 0.9144 | 0.8881 | 0.0071 |
+   | QPSO + Sobol (`results_qpso_pure`) | 9,664 | 0.9046 | 0.8777 | 0.0080 |
+   | Chen et al. BO (upstream, trial 501) | 603 | — | 0.9012 (one 5,000-shot sample) | — |
+
+The like-for-like statement the data supports: **with 32× the evaluations,
+RR-QPSO at M = 128 found parameters whose expected V×U (0.931 ± 0.004, 5,000
+shots, 24 shot seeds) exceeds that of Chen et al.'s published BO solution
+(0.901, one 5,000-shot sample).** At M = 64 (16× the evaluations) the margin is
++0.007, about one shot-noise SD, so not distinguishable. Two limits: every row
+is a single optimizer run — the across-seed SD of the optimizer itself is
+0.02–0.07 (`RESULTS.md` §7c), far larger than these margins — and whether BO
+given the same budget would do as well is untested (reference GPEI at 9,664+
+evaluations costs ~760 h per seed).
+
 ---
 
 ## 4. New evidence: the BO baseline was under-configured
@@ -225,10 +274,13 @@ Pre-registered tests, Holm-corrected:
 - **H1/H2, population > reference BO: not supported, and reversed.** δ = −0.840
   (QPSO) and −0.860 (RR-QPSO) at 960; δ = −1.000 for both at 205.
 
-205 evaluations is the budget the original QMG code actually uses
-(`constrained_bo.py` loops `range(num_iterations + 5)`;
-`analysis_figures/01_bo_analysis.ipynb` sets `num_iterations = 200`), so the
-reference BO wins decisively even at its own budget.
+205 evaluations is the budget of a single `constrained_bo.py` run
+(`range(num_iterations + 5)` with `num_iterations = 200`, as in the upstream
+functional-group notebook), and the reference BO wins decisively there too.
+**Correction (2026-10-12):** the upstream *unconditional 9-atom* result was not
+a single run — it chained `constrained_bo_further_opt.py` to **603 evaluations
+at 10,000 shots** (see §3, Resolution). The 960-evaluation endpoint is above
+that, so the conclusion is unchanged.
 
 **Limitations, stated plainly.** The reference BO's lead shrinks with budget
 (+0.33 at 205, +0.155 at 960). The manuscript's comparison is at 9,664

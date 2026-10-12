@@ -229,9 +229,11 @@ Pre-registered hypotheses, one-sided paired Wilcoxon, Holm-corrected:
 H1 and H2 do not merely fail — the effect is reversed. Reverse-direction
 one-sided p = 0.00098 and 0.00195 respectively (descriptive; not pre-registered).
 
-205 evaluations is the budget the original QMG code actually uses:
-`constrained_bo.py` loops `range(num_iterations + 5)` and the upstream analysis
-notebook sets `num_iterations = 200`. The reference BO wins decisively there too.
+205 evaluations is the budget of a single upstream `constrained_bo.py` run
+(`range(num_iterations + 5)`, `num_iterations = 200`), and the reference BO wins
+decisively there too. The upstream *unconditional 9-atom* result itself came
+from chained runs totalling **603 evaluations at 10,000 shots**
+(`benchmark/trace_upstream_bo.py`); 960 is above that.
 
 **Endpoint is 960, not 1,000.** `RRQPSO` delegates to `AESOQPSOOptimizer` with
 `T = max_evals // M − 2`, so it spends the largest multiple of M within budget —
@@ -421,7 +423,7 @@ of an ordering** — see the paired results above. Two rows carry corrections.
 
 | Optimizer | V (%) | U (%) | V × U (%) | As published | Correction |
 |---|---|---|---|---|---|
-| BO (“re-run baseline”) | 94.2 | 95.7 | 90.2 | 90.2 | **provenance unverified** — see below |
+| BO (“re-run baseline”) | 94.2 | 95.7 | 90.1 | 90.2 | **not a re-run** — Chen et al.'s published sample, 603 evals × 10,000 shots; see below |
 | QPSO, no Sobol init | — | — | **91.4** | 90.5 | **swapped** in Fig. 2 |
 | QPSO + Sobol init | — | — | **90.5** | 91.4 | **swapped** in Fig. 2 |
 | RR-QPSO (this work) | 95.9 | 97.0 | 93.0 | 93.0 | — |
@@ -442,8 +444,16 @@ result anywhere in this repository is 0.7150 at the same 9,664-evaluation budget
 (`results_bofull/`, n = 10), and the only 0.90-range figure in the codebase is a
 hard-coded literature constant of 0.8834 attributed to Chen 2025
 (`qpso_optimizer_ae.py:80`), which matches neither 0.902 nor the reported
-V = 94.2 / U = 95.7. This is an absence of evidence, not proof that no such run
-happened. Full write-up: [`docs/PAPER_ERRATA.md`](docs/PAPER_ERRATA.md).
+V = 94.2 / U = 95.7.
+
+**Traced (2026-10-12).** Both numbers come from the upstream repository
+(`benchmark/trace_upstream_bo.py`). 0.902 is `sample_unconditional_9_4_501.pkl`
+— 5,000 molecules from BO trial 501's parameters, the QMG bar of Chen et al.
+Fig. 3a: V = 0.9420, U = 0.9567, V×U = **0.9012**. 0.8834 is the best value
+*during* that BO (trial 536, 10,000 shots, exact 0.8827). So the baseline is a
+literature value, not a re-run, and it cost **603 evaluations × 10,000 shots**
+against RR-QPSO's 9,664 × 5,000 (M = 64) and 19,456 × 5,000 (M = 128).
+Full write-up: [`docs/PAPER_ERRATA.md`](docs/PAPER_ERRATA.md) §3.
 
 ![Fig. 2 — original optimizer comparison](figures/fig2_VU_bars.png)
 

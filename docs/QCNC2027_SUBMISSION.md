@@ -59,10 +59,10 @@ IEEE 一般允許作者在 arXiv 張貼預印本，但 double-blind 下送審稿
 
 | # | 預印本宣稱 | 出處 | 目前證據 | 判定 |
 |---|---|---|---|---|
-| C1 | BO 基準 V×U = **0.902**，「在相同實作與協定下重跑」 | 摘要、§IV-A、Fig. 2、§IV-B、結論 | 找不到任何能產生 0.902（V 94.2／U 95.7）的 run。codebase 中唯一 0.9 級的 BO 數字是寫死的文獻值 0.8834（Chen 2025，V 95.5／U 92.5）。自家 BO 全預算最佳 0.715。 | ✗ 無法溯源（ERRATA #3） |
+| C1 | BO 基準 V×U = **0.902**，「在相同實作與協定下重跑」 | 摘要、§IV-A、Fig. 2、§IV-B、結論 | **2026-10-12 已溯源**：是上游公開的 5,000 分子樣本（`sample_unconditional_9_4_501.pkl`，即 Chen et al. Fig. 3a），V 0.9420、U 0.9567、V×U **0.9012**——文獻值，**不是重跑**。該 BO 花 **603 次評估 × 10,000 shots**；RR-QPSO M=64 用 16 倍評估、M=128 用 32 倍。寫死的 0.8834 是 BO 過程中的最大值（trial 536，10,000 shots，精確值 0.8827）。 | ✗「重跑」一句為假；預算未對齊（ERRATA #3 Resolution） |
 | C2 | RR-QPSO 0.930 > QPSO+Sobol 0.914 > QPSO 0.905（M=64） | Fig. 2、§IV-A | n = 1。Fig. 2 兩根 QPSO 柱標籤**對調**，Sobol 的結論方向寫反（ERRATA #2）。10 配對 seed：p = 0.71。後續比較又帶四個偏向 QPSO 的混淆（FAIRNESS_AUDIT），**兩者至今未被公平比較**；公平重跑第一批因參數被靜默丟棄而作廢（§5）。 | ✗ 不可主張 |
 | C3 | M 掃描：M=128 達 0.942（Table I、Fig. 3） | §IV-B | Table I 六列 V×U **皆可由 CSV 重現**。但全是 seed=0 單次執行；winner's curse 使單次最大值高估 +0.011～+0.027（RESULTS §7）。專案筆記中 M=128 的 best_params 以 24 個取樣種子重評，期望值約 0.931 ± 0.004。 | △ 數字可溯源，需改報期望值並註明 n = 1 |
-| C4 | 比 BO 高 0.040（4 個百分點） | §IV-B、結論 | 分母即 C1。參考 BO（Ax/BoTorch GPEI，ARD）預登記比較：960 次評估中位 **0.929** vs RR-QPSO 0.779，H1/H2 **反向**（δ = −0.84／−0.86）；205 次（原始 QMG 程式自己的預算）也是 BO 完勝。9,664 次未能測（約 760 h/seed）。 | ✗ 反向 |
+| C4 | 比 BO 高 0.040（4 個百分點） | §IV-B、結論 | 分母即 C1。參考 BO（Ax/BoTorch GPEI，ARD）預登記比較：960 次評估中位 **0.929** vs RR-QPSO 0.779，H1/H2 **反向**（δ = −0.84／−0.86）；205 次也是 BO 完勝（上游無條件 9 原子實際用了 603 次）。9,664 次未能測（約 760 h/seed）。**同條件可成立的說法**：RR-QPSO M=128 以 32 倍評估，找到期望 V×U 0.931 ± 0.004（5,000 shots、24 個取樣種子）的參數，高於 Chen 公開 BO 解的 0.901（同為 5,000 shots 獨立重抽）；M=64 只高 +0.007，約一個雜訊標準差，無法區分。皆為單一最佳化 run（n=1）。 | ✗ 原主張反向；△ 改寫為「預算換品質」的描述性結果 |
 | C5 | 多目標：RR-QPSO（M=32）V×U 79.0% vs BO 43.8% | §IV-C、Fig. 4 | n = 1；BO 43.8% 的出處尚未像 C1 一樣核對。預登記實驗八（n = 10）：RR-QPSO **勝 CMA-ES 10/10**（δ = +0.94，p_holm = 0.002，成立）；勝 QPSO 不成立。實驗九（n = 45）RR vs QPSO **反轉**（Δ = −0.027）。 | ✗／△ BO 部分未驗證 |
 | C6 | 「8 顆 V100 平行評估」＋Table I 執行時間 | 摘要、Table I | 實測每節點 8 個 CUDA-Q worker 會因逾時作廢約一半評估（32 個只回 17 個有效）；2 個／節點吞吐量最佳。原始長跑可能受影響，執行時間非乾淨的效能數據。 | △ 需註明 |
 
@@ -146,7 +146,7 @@ IEEE 一般允許作者在 arXiv 張貼預印本，但 double-blind 下送審稿
 
 | 預印本 | 內容 | 資料 |
 |---|---|---|
-| Fig. 2 | BO／QPSO／QPSO+Sobol／RR-QPSO 長條圖 | `90_paper_original_runs/results_qpso_nosobol`（**無** Sobol，0.9144）、`results_qpso_pure`（**有** Sobol，0.9046）、`results_v8`（RR-QPSO M=64，0.9310）；BO 0.902 **無資料** |
+| Fig. 2 | BO／QPSO／QPSO+Sobol／RR-QPSO 長條圖 | `90_paper_original_runs/results_qpso_nosobol`（**無** Sobol，0.9144）、`results_qpso_pure`（**有** Sobol，0.9046）、`results_v8`（RR-QPSO M=64，0.9310）；BO 0.902 = 上游 `PEESEgroup/QMG` 的 `results_chemistry_constraint_bo/sample_unconditional_9_4_501.pkl`（`benchmark/trace_upstream_bo.py`） |
 | Fig. 3、Table I | M 掃描 16–128 | `90_paper_original_runs/results_sweep_M{16,32,48,96,128}` + `results_v8`（M=64） |
 | Fig. 4 | HBA/HBD 多目標 | `90_paper_original_runs/results_hbahbd_multiobj`；BO 43.8% 出處待查 |
 | — | 方法學研究（P1–P5） | `01`–`13` 各資料夾；統計值在 repo `figures_method/stats*.json` |
