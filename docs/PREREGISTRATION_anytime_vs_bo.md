@@ -205,3 +205,47 @@ per pair-checkpoint set, ≈ 3 h on the full partition.
   upstream environment.
 - **The harness differs** from every earlier experiment (fresh noise, time
   budget); results are not pooled with them.
+
+---
+
+## 10. Amendment — 2026-10-12, smoke tests, before the confirmatory batch
+
+Three smoke pairs, seed 999, 0.25 h budget, partition `large` (DGX107–109 idle),
+outputs `results_anytime_smoke{,2,3}/`. Excluded from every analysis.
+
+1. **Job 111058 (code `70c56f8`) found a bug.** `CHECKPOINT_HOURS=0.05,0.1,0.25`
+   reached both arms as `0.05`: `sbatch --export` splits on commas. Fixed in
+   `0380a19` (colon separator; the launcher now refuses a comma). Every other
+   check passed.
+2. **Job 111059 (`0380a19`) passed every §5.1 check.** Same host (DGX108); fresh
+   shot noise with contiguous, increasing seed ranges in both arms; the α override
+   `{'alpha_max': 1.2, 'alpha_min': 0.3}` present; Ax audit lines for ARD with 134
+   length scales and exactly 5 Sobol trials; the 0.25 h budget honoured — the
+   0.25 h checkpoint counts 256 of 320 RR-QPSO evaluations and 38 of 39 BO
+   evaluations, the straddling batch excluded as §4.6 specifies.
+   `test_score.py` (job 111062, K = 2) ran on its checkpoints; test scores sit
+   below the observed values (e.g. BO 0.495 observed → 0.420 test at 0.25 h),
+   as expected from selection on noisy draws and from 5,000-shot scoring.
+3. **Throughput differs from the pilot.** On an exclusive node the population arm
+   ran ≈ 1,280 evaluations per hour after a ~5-minute worker start-up — about
+   2.5× the pilot, whose runs shared nodes two jobs at a time. BO's early rate
+   matched the pilot (38 evaluations in the first ~0.25 h vs a pilot median of 38
+   at 0.22 h).
+
+   Consequence: §4.5's `MAX_EVALS = 12,288` was chosen so that the population
+   arms' α schedule would span ≈ 24 h *at the pilot's rate*; at the measured rate
+   it would end near hour 10 and leave the arm idle for the rest of the budget,
+   and on a slow node it would never finish annealing. **Changed, before any
+   confirmatory data:** both population arms anneal α linearly over the
+   wall-clock budget (`--alpha_by_time`, commit `5840f17`), and
+   `MAX_EVALS = 999,936` so that time is the only budget. Job 111060 (`5840f17`)
+   ran with the new schedule (`α 排程 : 依牆鐘` in the log) and passed the same
+   checks; `verify_anytime.py` (29 checks) confirms monotone annealing from
+   ≈ α_max to α_min and bit-identity when no budget is set.
+4. **Expectation, updated; hypotheses unchanged.** With the population arm ~2.5×
+   faster than in the pilot, the pilot's crossover (~12–14 h) is probably an
+   overestimate, so H2 (BO ahead at 4 h) is less certain than §1.1 suggests.
+   Annealing over 24 h keeps α high early, which works the other way. No
+   hypothesis, endpoint, test, seed set or decision rule is changed.
+
+§4.5 is superseded as to `MAX_EVALS` and the α horizon; everything else stands.
