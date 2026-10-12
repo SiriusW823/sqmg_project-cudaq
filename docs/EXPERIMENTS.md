@@ -4,9 +4,12 @@
 > [`CLUSTER.md`](CLUSTER.md)（叢集操作）·
 > [`STRUCTURE.md`](STRUCTURE.md)（程式架構）
 
-**更新日期**：2026-08-24　**資料位置**：`SQMG/experiments/`（1,075 檔，60 MB，**不進 git**——體積過大，
+**更新日期**：2026-10-12　**資料位置**：`SQMG/experiments/`（2,439 檔、169 MB、861 個 run，**不進 git**——體積過大，
 留在本機與叢集上；本文件是索引，說明每份資料是什麼、怎麼重現）
-**完整性**：全部檔案已以 SHA-256 對照 `manifest.csv` 驗證通過
+**下載**：GitHub Release [`data-2026-10-12`](https://github.com/SiriusW823/sqmg_project-cudaq/releases/tag/data-2026-10-12)
+（整個 `experiments/` 打包成 zip，附 `manifest.csv`）
+**完整性**：全部檔案已以 SHA-256 對照 `manifest.csv` 驗證通過（2026-10-12）
+**分類總覽**：`SQMG/experiments/INDEX.md`（由 `SQMG/tools/build_experiment_index.py` 自動產生）
 
 問題設定一律為：9 heavy-atom QMG，D=134，20 qubits，CUDA-Q 0.7.1，V100，
 目標函數 V×U，M=64，1,000 shots，配對設計（seed 同時控制最適化器與 shot 亂數）。
@@ -291,20 +294,26 @@ uniqueness 的定義是 `相異分子數 / 有效分子數`——shots 增加時
 
 ```
 SQMG/experiments/
-├── EXPERIMENTS.md              ← 本檔
-├── manifest.csv                ← 953 檔的 SHA-256 與行數
+├── EXPERIMENTS.md / INDEX.md   ← 說明與自動產生的分類總覽
+├── manifest.csv                ← 2,439 檔的 SHA-256 與行數（SQMG/tools/build_manifest.py 重建）
 ├── run_counts.json             ← 各組態的 run 數與評估數
 ├── 00_summary/                 ← 統計 JSON + 五張圖（PNG/PDF）
 ├── 01_alpha_alignment/         ← 實驗一
 ├── 02_longhorizon/             ← 實驗二
 ├── 03_ablation_pilot/          ← 實驗三
-├── 04_ablation_confirmatory/   ← 實驗四
-├── 05_bo_comparison/           ← 實驗六
-│   ├── a_capped_2000/
-│   ├── b_capped_9664/
-│   └── c_uncapped_2000/
+├── 04_ablation_confirmatory/   ← 實驗四（預登記）
+├── 05_bo_comparison/           ← 實驗六（已撤回：比較對象 bayesopt.py 有缺陷）
 ├── 06_algorithm_benchmark/     ← 八演算法前導批（M=32、512 次）
-└── 07_eight_algorithms_M64/    ← 八演算法正式批（M=64、9,664 次）
+├── 07_eight_algorithms_M64/    ← 八演算法正式批（M=64、9,664 次）
+├── 08_constrained_hbahbd/      ← 實驗八（預登記）
+├── 09_h1_replication/          ← 實驗九（預登記）
+├── 10_diversity/               ← 實驗十（預登記）
+├── 11_reference_bo/            ← 實驗十一：參考 BO（預登記）
+├── 12_cmaes_confirmatory/      ← 實驗七（預登記）
+├── 13_bo_budget/               ← BO 預算與 GP 上限對照
+├── 90_paper_original_runs/     ← 預印本 Fig. 2–4、Table I 的單次執行（n=1）
+└── 99_voided_superseded/       ← 作廢批次，僅供稽核
+    └── results_rrfair_void_0917/   rrfair 第一批（見 VOID_README.md 與 QCNC2027_SUBMISSION.md §5）
 ```
 
 每個 run 有三個檔案：`{task}.csv`（逐次評估紀錄）、

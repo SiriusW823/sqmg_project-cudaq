@@ -184,3 +184,9 @@ the audit on your own method and not only on the comparator.
 
 Items 1–4 are all fixes to the harness. Until they are made, adding seeds only
 measures the harness more precisely.
+
+**Status (2026-10-12).** Items 1–4 were implemented in `6bb272c` and item 5 in
+`894ad76`. The first batch run under that plan (150 runs, seeds 300–329) is
+**void**: every hyperparameter override was silently dropped (`7c09dcb`), so the
+ablation arms equalled `rr_qpso2` and the α schedules differed again. No
+corrected batch has been run. See `QCNC2027_SUBMISSION.md` §5.

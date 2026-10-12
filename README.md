@@ -125,6 +125,23 @@ RR-QPSO update.
 > The reference-BO conclusion in (2) is unaffected — that gap is an order of
 > magnitude larger, and plain QPSO carries none of these handicaps.
 >
+> **4. The fair re-run's first batch is void and has not been repeated.** The
+> pre-registered comparison (`docs/PREREGISTRATION_rrqpso_fair.md`, 150 runs,
+> 2026-09-17 to 09-21) ran with every hyperparameter override silently dropped:
+> the three ablation arms ran the same configuration as `rr_qpso2`, and
+> `rr_qpso2` fell back to α ∈ [0.5, 1.0] while `qpso` used [0.3, 1.2]. Fixed in
+> `7c09dcb`; no corrected batch has been run, so question (3) is still open.
+>
+> **Preprint and submission.** The v1 preprint
+> ([arXiv:2607.10284](https://arxiv.org/abs/2607.10284), copy in [`paper/`](paper/))
+> predates all of the above. A claim-by-claim comparison against current
+> evidence, and the QCNC 2027 submission plan, are in
+> [`docs/QCNC2027_SUBMISSION.md`](docs/QCNC2027_SUBMISSION.md).
+>
+> Raw data for every experiment (CSV, best parameters, summaries, SHA-256
+> manifest): GitHub Release
+> [`data-2026-10-12`](https://github.com/SiriusW823/sqmg_project-cudaq/releases/tag/data-2026-10-12).
+>
 > The particle-count sweep and the multi-objective results are **not** affected
 > by (1) and are retained below; their BO comparison points are affected by (2).
 >
@@ -708,6 +725,11 @@ sqmg_project-cudaq/
 │   ├── RESULTS.md                              ★ methodological study: full narrative and statistics
 │   ├── EXPERIMENTS.md                          ★ index of all runs: what each dataset is, how to reproduce
 │   ├── CLUSTER.md                              partitions, time limits, node quirks, chained long jobs
+│   ├── PAPER_ERRATA.md                         errata for the v1 preprint (arXiv:2607.10284)
+│   ├── FAIRNESS_AUDIT.md                       the same audit applied to RR-QPSO itself
+│   ├── QCNC2027_SUBMISSION.md                  claim-vs-evidence table + QCNC 2027 submission plan
+│   ├── PREREGISTRATION_axbo.md                 reference-BO study
+│   ├── PREREGISTRATION_rrqpso_fair.md          fair RR-QPSO vs QPSO (first batch void, see Results)
 │   ├── PREREGISTRATION_ablation_confirmatory.md   analysis plans, each committed before its data
 │   ├── PREREGISTRATION_cmaes_confirmatory.md
 │   ├── PREREGISTRATION_hbahbd_confirmatory.md
@@ -716,6 +738,7 @@ sqmg_project-cudaq/
 │   ├── STRUCTURE.md                            architecture cheat-sheet
 │   ├── EXPERIMENT_DESIGN.md                    fair-comparison protocol and statistical plan
 │   └── *.TEMPLATE.log                          reference log format
+├── paper/                                   ← v1 preprint PDF (arXiv:2607.10284) — read with docs/PAPER_ERRATA.md
 ├── figures/                                 ← paper figures (fig1–fig4, PNG + PDF + TikZ source)
 ├── figures_method/                          ← methodological study figures + stats.json (single source of numbers)
 ├── results/                                 ← paper data, grouped per figure
@@ -886,6 +909,8 @@ generator, which this work deliberately leaves untouched.
 
 > S.-Y. Wu, S. Y. Wu, I-M. Chiang, T.-Y. Li. *Rank-Refined Quantum-Behaved
 > Particle Swarm Optimization for Quantum Molecular Generation.*
+> arXiv:2607.10284 [quant-ph], 2026. — read with
+> [`docs/PAPER_ERRATA.md`](docs/PAPER_ERRATA.md).
 
 Computational resources provided by the National Center for High-performance
 Computing (NCHC), National Institutes of Applied Research (NIAR), Taiwan.
