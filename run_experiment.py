@@ -135,6 +135,8 @@ def parse_args():
                         "預設關閉＝整個 run 共用 --shot_seed（歷史行為）")
     p.add_argument("--time_budget_h", type=float, default=None,
                    help="牆鐘預算（小時）。到時不再開始新的評估批次。")
+    p.add_argument("--alpha_by_time", action="store_true", default=False,
+                   help="QPSO 家族：α 依已用牆鐘／時間預算線性遞減（需 --time_budget_h）")
     p.add_argument("--checkpoint_hours", type=str, default="",
                    help="以冒號（或逗號）分隔的時間點（小時），在這些時刻保存 incumbent，"
                         "例如 2:4:8:12:16:20:24。經 sbatch --export 傳遞時必須用冒號。")
@@ -216,6 +218,10 @@ def main() -> None:
     ckpt_h = [float(x) for x in _re.split(r"[,:]", args.checkpoint_hours) if x.strip()]
     if ckpt_h and args.time_budget_h is not None and max(ckpt_h) > args.time_budget_h:
         raise SystemExit("[FATAL] 檢查點不可晚於時間預算。")
+    if args.alpha_by_time and args.time_budget_h is None:
+        raise SystemExit("[FATAL] --alpha_by_time 需要 --time_budget_h。")
+    if args.alpha_by_time and args.optimizer not in ("qpso", "rr_qpso2"):
+        raise SystemExit(f"[FATAL] --alpha_by_time 只適用於 qpso / rr_qpso2（收到 {args.optimizer}）。")
 
     from optimizers import get_optimizer
     from qmg.utils import ConditionalWeightsGenerator
@@ -371,6 +377,9 @@ def main() -> None:
         opt.time_budget_s = float(args.time_budget_h) * 3600.0
     if ckpt_h:
         opt.checkpoint_s = [h * 3600.0 for h in ckpt_h]
+    if args.alpha_by_time:
+        opt.alpha_by_time = True
+        logger.info("  α 排程        : 依牆鐘（elapsed / time_budget），於預算內由 α_max 降到 α_min")
 
     if opt.n_evals >= max_evals:
         logger.info(f"已完成 {opt.n_evals}/{max_evals} 次評估，無需再跑。")
@@ -392,6 +401,7 @@ def main() -> None:
             "shot_seed": args.shot_seed,
             "fresh_shot_noise": args.fresh_shot_noise,
             "time_budget_h": args.time_budget_h,
+            "alpha_by_time": args.alpha_by_time,
             "checkpoint_hours": ckpt_h,
             "host": socket.gethostname(),
             "gpu_ids": args.gpu_ids, "n_gpus": args.n_gpus,

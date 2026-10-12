@@ -10,7 +10,8 @@
 # 兩者共用同一節點、同一時段，節點速度與負載差異因此被配對抵消。
 #
 # 必填 export：ARM_A ARM_B SEED DATA_DIR TIME_BUDGET_H CHECKPOINT_HOURS
-# 選填 export：SHOTS(1000) M(64) MAX_EVALS(12288) ALPHA_MAX ALPHA_MIN
+# 選填 export：SHOTS(1000) M(64) MAX_EVALS(999936) ALPHA_MAX ALPHA_MIN
+#   population arm 一律 ALPHA_BY_TIME=1：α 在 24 h 預算內線性退火（§10）
 #
 #   sbatch -N1 -p nchc --exclusive --gres=gpu:8 --time=26:00:00 --no-requeue \
 #     --export=ALL,ARM_A=rr_qpso2,ARM_B=ax_bo,SEED=500,DATA_DIR=results_anytime,\
@@ -29,7 +30,7 @@ cd "$REPO"
 
 ARM_A=${ARM_A:?}; ARM_B=${ARM_B:?}; SEED=${SEED:?}
 DATA_DIR=${DATA_DIR:?}; TIME_BUDGET_H=${TIME_BUDGET_H:?}; CHECKPOINT_HOURS=${CHECKPOINT_HOURS:?}
-SHOTS=${SHOTS:-1000}; M=${M:-64}; MAX_EVALS=${MAX_EVALS:-12288}
+SHOTS=${SHOTS:-1000}; M=${M:-64}; MAX_EVALS=${MAX_EVALS:-999936}   # 時間是唯一預算（64 的倍數）
 mkdir -p "$DATA_DIR"
 
 case "$CHECKPOINT_HOURS" in
@@ -57,7 +58,7 @@ launch () {   # $1=arm  $2=GPU_IDS  $3=NGPUS  $4=額外 export
 
 arm_env () {  # 依 arm 給出專屬設定（population arm 帶 α 覆寫；ax_bo 指定 GP 卡）
   case "$1" in
-    qpso|rr_qpso2) echo "ALPHA_MAX=${ALPHA_MAX:-1.2} ALPHA_MIN=${ALPHA_MIN:-0.3}" ;;
+    qpso|rr_qpso2) echo "ALPHA_MAX=${ALPHA_MAX:-1.2} ALPHA_MIN=${ALPHA_MIN:-0.3} ALPHA_BY_TIME=1" ;;
     ax_bo)         echo "AX_TORCH_DEVICE=cuda:5" ;;
     *)             echo "" ;;
   esac

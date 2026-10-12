@@ -90,6 +90,34 @@ with tempfile.TemporaryDirectory() as d:
     xb, fb = b.run()
 check("同 seed、無預算 → 結果相同", np.array_equal(xa, xb) and fa == fb, f"{fa:.10f} vs {fb:.10f}")
 
+print("\n=== 5b. α 依牆鐘退火 ===")
+with tempfile.TemporaryDirectory() as d:
+    o = make("qpso", 9, d, max_evals=10**6, delay=0.05, alpha_max=1.2, alpha_min=0.3)
+    o.time_budget_s = 2.0; o.alpha_by_time = True
+    seen = []
+    import optimizers.qpso as _q
+    _clip = _q.np.clip
+    def spy(a, lo, hi, *args, **kw):
+        r = _clip(a, lo, hi, *args, **kw)
+        if _q.np.ndim(a) == 0 and lo == 0.3 and hi == 1.2:
+            seen.append(float(r))
+        return r
+    _q.np.clip = spy
+    try:
+        o.run()
+    finally:
+        _q.np.clip = _clip
+    check("α 從接近 α_max 單調下降到接近 α_min", len(seen) > 5 and seen[0] > 1.1 and seen[-1] < 0.5
+          and all(b <= a + 1e-12 for a, b in zip(seen, seen[1:])),
+          f"n={len(seen)} first={seen[0]:.3f} last={seen[-1]:.3f}" if seen else "no alpha seen")
+with tempfile.TemporaryDirectory() as d:
+    a = make("rr_qpso2", 7, d, max_evals=96, alpha_max=1.2, alpha_min=0.3); xa, fa = a.run()
+with tempfile.TemporaryDirectory() as d:
+    b = make("rr_qpso2", 7, d, max_evals=96, alpha_max=1.2, alpha_min=0.3)
+    b.alpha_by_time = True            # 沒有時間預算 → 必須退回依評估次數
+    xb, fb = b.run()
+check("alpha_by_time 但無時間預算 → 行為不變", np.array_equal(xa, xb) and fa == fb)
+
 print("\n=== 6. CLI 接線 ===")
 h = subprocess.run([sys.executable, "run_experiment.py", "--help"], capture_output=True, text=True).stdout
 for flag in ("--fresh_shot_noise", "--time_budget_h", "--checkpoint_hours"):
@@ -109,6 +137,9 @@ check("配對腳本：兩臂皆 fresh noise、同一 SHOT_SEED", "FRESH_SHOT_NOI
 check("配對腳本：以時間回收 worker（各演算法一致）", "QMG_RECYCLE_MINUTES=18" in pa and "QMG_RECYCLE_EVERY=0" in pa)
 check("配對腳本：population arm 帶 α 覆寫", "ALPHA_MAX=${ALPHA_MAX:-1.2}" in pa)
 check("配對腳本：拒絕含逗號的 CHECKPOINT_HOURS", "CHECKPOINT_HOURS 含逗號" in pa)
+check("配對腳本：population arm 帶 ALPHA_BY_TIME=1", "ALPHA_BY_TIME=1" in pa)
+check("benchmark.slurm 轉傳 ALPHA_BY_TIME", "ALPHA_BY_TIME" in sl)
+check("run_experiment 有 --alpha_by_time", "--alpha_by_time" in h)
 
 print("\n" + ("全部通過" if ok else "★ 有項目未通過，不可送實驗"))
 sys.exit(0 if ok else 1)

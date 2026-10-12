@@ -22,6 +22,8 @@ optimizers/qpso.py — QPSO（原版）與 RR-QPSO（本專案方法）（v12.0�
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from .base import BaseOptimizer, BudgetExhausted
@@ -150,8 +152,15 @@ class QPSO(BaseOptimizer):
         self.iteration += 1
 
         t = 0
+        # α 排程的進度：預設依評估次數（t / T_est）；
+        # 有時間預算且 alpha_by_time=True 時改依已用牆鐘（elapsed / budget），
+        # 讓收縮擴張係數恰好在預算內從 α_max 走到 α_min——固定的評估上限在
+        # 節點快慢不一時會提早結束或來不及收斂（PREREGISTRATION_anytime_vs_bo §10）。
+        # 只影響 α 的值，不消耗 rng，旗標關閉時與舊版逐位元相同。
+        by_time = bool(getattr(self, "alpha_by_time", False)) and bool(self.time_budget_s)
         while True:
-            alpha = self.alpha_max - (self.alpha_max - self.alpha_min) * (t / T_est)
+            frac = ((time.time() - self._t0) / self.time_budget_s) if by_time else (t / T_est)
+            alpha = self.alpha_max - (self.alpha_max - self.alpha_min) * frac
             alpha = float(np.clip(alpha, self.alpha_min, self.alpha_max))
 
             mbest = self._guided(self._mbest(pbest, pbest_f))

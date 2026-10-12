@@ -57,6 +57,7 @@ EXTRA=""
 [ "${FRESH_SHOT_NOISE:-0}" = "1" ] && EXTRA="$EXTRA --fresh_shot_noise"
 [ -n "${TIME_BUDGET_H:-}" ]    && EXTRA="$EXTRA --time_budget_h $TIME_BUDGET_H"
 [ -n "${CHECKPOINT_HOURS:-}" ] && EXTRA="$EXTRA --checkpoint_hours $CHECKPOINT_HOURS"
+[ "${ALPHA_BY_TIME:-0}" = "1" ] && EXTRA="$EXTRA --alpha_by_time"
 
 # ── ax_bo 專用：跨環境執行 ──────────────────────────────────────────────
 # ax-platform 0.4.3 會拉 CUDA 13 的 torch，與 cuda-quantum 0.7.1 的 CUDA 12
