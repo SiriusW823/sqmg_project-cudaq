@@ -153,3 +153,12 @@ IEEE 一般允許作者在 arXiv 張貼預印本，但 double-blind 下送審稿
 | — | 作廢批次 | `99_voided_superseded/`（含 rrfair 第一批） |
 
 ⚠ 目錄名 `results_qpso_pure` 與 `results_qpso_nosobol` 的語意與內容**相反**，一律以 log 內的初始化設定為準。
+
+---
+
+## 9. 同硬體、同牆鐘的確認實驗（2026-10-12 預登記）
+
+[`PREREGISTRATION_anytime_vs_bo.md`](PREREGISTRATION_anytime_vs_bo.md)：RR-QPSO 對參考 BO，
+同一節點並排、各 24 小時、24 個配對 seed。依既有資料（探索性）的預測：BO 前 ~12 小時領先，
+RR-QPSO／QPSO 在 ~14 小時後反超（24 h：0.964／0.970 vs 0.924）。預計 10/20–21 完成，
+**趕不上 QCNC 截稿**——稿件只能以探索性結果呈現此圖，並註明確認實驗已預登記、進行中。
