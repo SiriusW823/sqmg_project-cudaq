@@ -206,3 +206,18 @@ early look is tempting. Rules:
 - Ablation arms are analysed once, after all 150 runs complete.
 
 The stopping rule of §6 is unchanged.
+
+### 8.6 Analysis code — 2026-10-13, before any statistic from the corrected batch
+
+`benchmark/rrfair2_analyze.py` is the §5 analysis that was run on the void batch
+(§8.2), moved into the repository and split into the two stages §8.5 already
+fixes: `--stage h1` (§5.1 checks on `qpso` and `rr_qpso2`, then H1 @2,000 and
+H2 @500) and `--stage ablation` (all five arms, only after all 150 runs). In the
+`h1` stage the ablation arms are neither summarised nor tested; they enter only
+the §8.4 "not identical at 500" check, which compares values for equality and
+prints none. Tests, endpoints, effect sizes, bootstrap seed and decision rules
+are unchanged.
+
+State when this was committed (from `rrfair2_status.sh`, which prints no
+fitness): `qpso` 30/30 and `rr_qpso2` 30/30 runs at 2,000 evaluations, §5.1(c)
+configuration check 0 errors in all five arms; ablation arms 10/90 complete.
