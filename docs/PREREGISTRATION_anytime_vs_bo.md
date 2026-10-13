@@ -257,3 +257,20 @@ outputs `results_anytime_smoke{,2,3}/`. Excluded from every analysis.
 and bootstrap CIs (seed 20261012), and the descriptive table. It was exercised
 only on synthetic files. The confirmatory pairs are jobs **111063–111086**,
 submitted 2026-10-12 20:54, queued behind `rrfair2`.
+
+## 12. Schedule change — 2026-10-13 18:45, before any pair has started
+
+The 70 pending ablation jobs of the `rrfair2` batch were held
+(`PREREGISTRATION_rrqpso_fair.md` §8.7) so that the 24 pairs (jobs
+111063–111086) start as soon as the 10 running ablation runs free their nodes,
+expected from about 21:00 the same evening. Nothing in this study's design,
+hypotheses, analysis or exclusion rules changes. The `qpso` arm (E3) and the
+held ablation jobs are submitted/released only after all 24 pairs have started,
+so they cannot take a node a pair is waiting for.
+
+Context, stated so it is on record before any pair data exists: the corrected
+`rrfair2` batch found no advantage of `rr_qpso2` over `qpso` at 2,000
+evaluations (H1 not supported, Δ median −0.012, 95% CI [−0.023, +0.008]). The
+arms of this study are kept as registered; a positive H1 here is therefore read
+as a property of the QPSO family as instantiated by `rr_qpso2`, not of the
+rank-refined mechanism.

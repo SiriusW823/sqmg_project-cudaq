@@ -221,3 +221,13 @@ are unchanged.
 State when this was committed (from `rrfair2_status.sh`, which prints no
 fitness): `qpso` 30/30 and `rr_qpso2` 30/30 runs at 2,000 evaluations, §5.1(c)
 configuration check 0 errors in all five arms; ablation arms 10/90 complete.
+
+### 8.7 Ablation arms held — 2026-10-13 18:45
+
+After H1 was analysed (§8.6), the 70 ablation jobs still pending were put on
+`scontrol hold` so the equal-hardware study (`PREREGISTRATION_anytime_vs_bo.md`)
+can run first; the 10 ablation runs already executing were left alone. This
+changes only *when* the ablation arms run. Their configuration, seeds, budget and
+the single analysis after all 150 runs (`--stage ablation`) are unchanged. Held
+job IDs are listed on the cluster in `results_rrfair2/held_ablation_jobs.txt`;
+`SQMG/scripts/rrfair2_release_ablation.sh` releases them.
