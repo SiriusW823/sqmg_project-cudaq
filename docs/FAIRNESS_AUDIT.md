@@ -188,5 +188,22 @@ measures the harness more precisely.
 **Status (2026-10-12).** Items 1–4 were implemented in `6bb272c` and item 5 in
 `894ad76`. The first batch run under that plan (150 runs, seeds 300–329) is
 **void**: every hyperparameter override was silently dropped (`7c09dcb`), so the
-ablation arms equalled `rr_qpso2` and the α schedules differed again. No
-corrected batch has been run. See `QCNC2027_SUBMISSION.md` §5.
+ablation arms equalled `rr_qpso2` and the α schedules differed again. See `QCNC2027_SUBMISSION.md` §5.
+
+**Result of the corrected batch (2026-10-13, `results_rrfair2/`, analysis
+`benchmark/rrfair2_analyze.py --stage h1`, commit `29bfc4d`).** §5.1(a–c)
+passed (30/30 runs per arm at 2,000 evaluations, 30 distinct starts per arm,
+configuration applied in every log, rr-family arms not identical at 500).
+
+| | qpso median | rr_qpso2 median | Δ median (rr − qpso) | 95% CI | wins/losses | δ | d_z | p (one-sided) |
+|---|---|---|---|---|---|---|---|---|
+| **H1** @2,000 | 0.8795 | 0.8750 | −0.0120 | [−0.0230, +0.0075] | 10/20 | −0.116 | −0.190 | 0.79 |
+| H2 @500 | 0.5995 | 0.6225 | +0.0330 | [+0.0020, +0.0535] | 21/9 | +0.177 | +0.249 | 0.072 |
+
+**H1 is not supported.** Under a fair harness, RR-QPSO shows no advantage over
+plain QPSO at 2,000 evaluations; the point estimate favours QPSO (reverse
+p = 0.21, descriptive). By §6 this is a null with its interval, not a proof of
+equivalence: n = 30 rules out large effects only (80% power at d_z ≈ 0.53).
+H2 is not interpreted (§5 step 2: only if H1 holds). The stopping rule applies:
+no further seeds, endpoints or budgets on this line. Ablation arms are analysed
+once all 150 runs finish (§8.5).
