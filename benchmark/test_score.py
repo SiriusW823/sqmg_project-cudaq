@@ -105,8 +105,17 @@ def main() -> None:
 
     for task, h, f in todo:
         t0 = time.time()
-        d = np.load(f)
-        x = d["x"]
+        # 檢查點不是原子寫入；評分與最後一波重疊時，可能剛好讀到正在寫的檔案。
+        # 讀不到就跳過，第二次送出時會補評（已評的不會重評）。
+        try:
+            if time.time() - os.path.getmtime(f) < 120:
+                raise OSError("剛寫入，下次再評")
+            d = np.load(f)
+            x = d["x"]
+            _ = (d["carried"], d["n_evals"], d["f"])
+        except Exception as e:
+            print(f"  ⚠ 略過 {os.path.basename(f)}：{e}", flush=True)
+            continue
         mt = TASK_RE.match(task)
         arm, seed = (mt.group("arm"), int(mt.group("seed"))) if mt else ("?", -1)
         row = {"task": task, "arm": arm, "seed": seed, "ckpt_h": h,
