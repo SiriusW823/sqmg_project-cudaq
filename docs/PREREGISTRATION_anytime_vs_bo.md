@@ -274,3 +274,15 @@ evaluations (H1 not supported, Δ median −0.012, 95% CI [−0.023, +0.008]). T
 arms of this study are kept as registered; a positive H1 here is therefore read
 as a property of the QPSO family as instantiated by `rr_qpso2`, not of the
 rank-refined mechanism.
+
+## 13. Test scoring in two passes — 2026-10-16, before any test score exists
+
+So that the final result is not held up by the last wave, test scoring runs in
+two passes: the completed pairs while wave 5 runs (one node is free then), and
+the last four pairs after it ends. `benchmark/test_score.py` was changed so this
+cannot miss or duplicate a checkpoint: a shard now owns a checkpoint by a hash of
+(task, hour) rather than by its index in the file list, and skips anything
+already in *any* shard's CSV. Verified on synthetic checkpoints (two passes,
+staggered shard starts: 336/336 scored, 0 duplicates). The endpoint — K = 16
+unseen seeds × 5,000 shots per incumbent, same seeds for every arm — is
+unchanged. No score is read before all 24 pairs are scored and §5.1 is run.

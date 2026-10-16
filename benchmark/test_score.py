@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import time
+import zlib
 
 import numpy as np
 
@@ -70,22 +71,29 @@ def main() -> None:
         if want_h and h not in want_h:
             continue
         files.append((m.group("task"), h, f))
-    mine = [x for i, x in enumerate(files) if i % args.n_shards == args.shard]
-
+    # 已評過的 (task, ckpt)：讀輸出目錄裡「所有」shard 的 CSV，而不只自己的那一份。
+    # 分兩次評分時（先評已完成的配對、最後一波結束再補），檔案清單會變，
+    # 若只看自己的 CSV，shard 指派一變就會重評別的 shard 已評過的檢查點。
+    # shard 指派用 (task, ckpt) 的雜湊，與檔案清單和啟動時間無關：
+    # 20 個 shard 不會同時開跑，若用清單索引，晚開跑的 shard 看到的清單不同，
+    # 會漏評或重評。
     done = set()
-    if os.path.exists(args.out):
-        with open(args.out, newline="", encoding="utf-8") as fh:
+    out_dir = os.path.dirname(os.path.abspath(args.out))
+    os.makedirs(out_dir, exist_ok=True)
+    for prev in glob.glob(os.path.join(out_dir, "*.csv")):
+        with open(prev, newline="", encoding="utf-8") as fh:
             for r in csv.DictReader(fh):
                 if int(r["K"]) == args.K and int(r["num_sample"]) == args.num_sample:
                     done.add((r["task"], float(r["ckpt_h"])))
-    else:
-        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    if not os.path.exists(args.out):
         with open(args.out, "w", newline="", encoding="utf-8") as fh:
             csv.DictWriter(fh, fieldnames=FIELDS).writeheader()
 
-    todo = [x for x in mine if (x[0], x[1]) not in done]
-    print(f"shard {args.shard}/{args.n_shards}: {len(mine)} 個檢查點，"
-          f"已完成 {len(mine) - len(todo)}，待評 {len(todo)}  "
+    remaining = [x for x in files if (x[0], x[1]) not in done]
+    todo = [x for x in remaining
+            if zlib.crc32(f"{x[0]}|{x[1]:g}".encode()) % args.n_shards == args.shard]
+    print(f"shard {args.shard}/{args.n_shards}: 檢查點共 {len(files)}，"
+          f"已評 {len(files) - len(remaining)}，本 shard 待評 {len(todo)}  "
           f"(K={args.K}, shots={args.num_sample}, 測試種子 {TEST_SEED_BASE}+j)", flush=True)
     if not todo:
         return
