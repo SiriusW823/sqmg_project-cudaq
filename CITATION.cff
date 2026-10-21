@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "Please cite the published arXiv preprint when using this historical code or data."
+type: software
+title: "RR-QPSO for Quantum Molecular Generation — arXiv v1 code and data"
+version: "arxiv-v1"
+repository-code: "https://github.com/SiriusW823/sqmg_project-cudaq"
+url: "https://arxiv.org/abs/2607.10284v1"
+authors:
+  - family-names: Wu
+    given-names: Sing-Yun
+  - family-names: Wu
+    given-names: Sheng Yun
+  - family-names: Chiang
+    given-names: I-Min
+  - family-names: Li
+    given-names: Tai-Yue
+preferred-citation:
+  type: article
+  title: "Rank-Refined Quantum-Behaved Particle Swarm Optimization for Quantum Molecular Generation"
+  authors:
+    - family-names: Wu
+      given-names: Sing-Yun
+    - family-names: Wu
+      given-names: Sheng Yun
+    - family-names: Chiang
+      given-names: I-Min
+    - family-names: Li
+      given-names: Tai-Yue
+  year: 2026
+  doi: "10.48550/arXiv.2607.10284"
+  url: "https://arxiv.org/abs/2607.10284v1"
